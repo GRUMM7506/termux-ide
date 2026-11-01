@@ -121,7 +121,7 @@ void main() {
     await t.tap(find.byTooltip('Терминал'));
     await settle(t, () => find.byType(TerminalView).evaluate().isNotEmpty);
     await t.tap(find.byType(TerminalView));
-    await t.pump();
+    await t.pump(const Duration(milliseconds: 400)); // let xterm's double-tap timer expire
     final before = t.state(find.byType(TerminalView));
     expect(t.testTextInput.hasAnyClients, isTrue);
 

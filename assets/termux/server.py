@@ -25,7 +25,7 @@ import termios
 import time
 import urllib.parse
 
-VERSION = "2.0.1"
+VERSION = "2.0.2"
 HOME = os.environ.get("HOME", "/data/data/com.termux/files/home")
 DIR = os.path.join(HOME, ".termux-ide")
 PORT = 8765
@@ -422,6 +422,26 @@ async def api(method, path, q, body):
     raise LookupError(path)
 
 
+async def read_body(reader, headers):
+    """Request body with Content-Length or chunked transfer encoding."""
+    if "chunked" in headers.get("transfer-encoding", "").lower():
+        data = bytearray()
+        while True:
+            size_line = await reader.readuntil(b"\r\n")
+            size = int(size_line.split(b";")[0].strip() or b"0", 16)
+            if size == 0:
+                # trailers until an empty line
+                while (await reader.readuntil(b"\r\n")) != b"\r\n":
+                    pass
+                return bytes(data)
+            data += await reader.readexactly(size)
+            await reader.readexactly(2)
+            if len(data) > 64 * 1024 * 1024:
+                raise ValueError("тело запроса слишком большое")
+    n = int(headers.get("content-length", "0") or 0)
+    return await reader.readexactly(n) if n else b""
+
+
 def http_response(writer, status, obj):
     data = json.dumps(obj).encode()
     reason = {200: "OK", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found", 500: "Error"}.get(status, "OK")
@@ -453,11 +473,13 @@ async def handle(reader, writer):
             await ws_term(reader, writer, headers, q)
             return
         body = {}
-        n = int(headers.get("content-length", "0") or 0)
-        if n:
-            body = json.loads((await reader.readexactly(n)).decode("utf-8"))
+        raw = await read_body(reader, headers)
+        if raw:
+            body = json.loads(raw.decode("utf-8"))
         try:
             http_response(writer, 200, await api(method, u.path, q, body))
+        except KeyError as e:
+            http_response(writer, 400, {"error": f"нет параметра {e}"})
         except LookupError as e:
             http_response(writer, 404, {"error": f"не найдено: {e}"})
         except Exception as e:

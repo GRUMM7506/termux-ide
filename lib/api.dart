@@ -52,7 +52,9 @@ class Api {
     final req = await _http.postUrl(_u(path));
     req.headers.set('x-token', token);
     req.headers.contentType = ContentType.json;
-    req.add(utf8.encode(jsonEncode(body)));
+    final bytes = utf8.encode(jsonEncode(body));
+    req.contentLength = bytes.length; // no chunked encoding
+    req.add(bytes);
     return _read(await req.close());
   }
 
