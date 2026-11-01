@@ -3,7 +3,7 @@
 Редактор кода для Android в связке с [Termux](https://github.com/termux/termux-app).
 
 **Установка**
-1. Скачай `TermuxIDE-*.apk` ниже и установи.
+1. Скачай `TermuxIDE-*-arm64-v8a.apk` (подходит почти всем телефонам) или `*-universal.apk` и установи.
 2. Поставь Termux с [F-Droid](https://f-droid.org/packages/com.termux/) или [GitHub](https://github.com/termux/termux-app/releases) (версия из Google Play не подходит).
 3. Открой Termux IDE — встроенный мастер настройки проведёт по шагам (одна команда в Termux + одно разрешение).
 

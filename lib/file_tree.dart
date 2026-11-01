@@ -43,9 +43,9 @@ class FileTreeState extends State<FileTree> {
   }
 
   @override
-  void didUpdateWidget(covariant FileTree old) {
-    super.didUpdateWidget(old);
-    if (old.root != widget.root) {
+  void didUpdateWidget(covariant FileTree oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.root != widget.root) {
       _children.clear();
       _expanded
         ..clear()

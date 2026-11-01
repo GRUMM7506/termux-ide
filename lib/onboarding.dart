@@ -52,7 +52,8 @@ class _OnboardingPageState extends State<OnboardingPage> with WidgetsBindingObse
   Future<void> _check() async {
     final t = await Native.isTermuxInstalled();
     final p = t && await Native.hasRunCommandPermission();
-    if (mounted) setState(() {
+    if (!mounted) return;
+    setState(() {
       _termux = t;
       _perm = p;
     });
