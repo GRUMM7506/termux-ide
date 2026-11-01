@@ -143,7 +143,8 @@ void main() {
     }
     expect(sessions.where((s) => s['code'] == 0 && '${s['title']}'.startsWith('Bash')), isNotEmpty);
 
-    // Terminal panel is open with the run tab.
+    // Terminal panel is open with the run tab (the UI may lag behind the server a bit).
+    await settle(t, () => find.text('Bash: текущий файл').evaluate().isNotEmpty);
     expect(find.text('Bash: текущий файл'), findsWidgets);
 
     // System back closes the project, even after the program has finished.
