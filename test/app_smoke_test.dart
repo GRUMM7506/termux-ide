@@ -218,18 +218,19 @@ void main() {
     mockNative();
     final api = Api(token, port: port);
     final root = '${home.path}/projects/gitdemo';
+    await t.runAsync(() => api.write('$root/tablet_file.dart', '// tablet\n'));
     final st = (await t.runAsync(() => Settings.load(home.path)))!;
     final tools = (await t.runAsync(() => api.info()))!.tools;
     await t.pumpWidget(MaterialApp(
       theme: ThemeData.dark(),
       home: IdePage(api: api, settings: st, root: root, tools: tools, onClose: () {}),
     ));
-    await settle(t, () => find.text('new_file.dart').evaluate().isNotEmpty); // file tree loaded
+    await settle(t, () => find.text('tablet_file.dart').evaluate().isNotEmpty); // file tree loaded
     await t.tap(find.text('Git'));
     await t.pump();
-    await settle(t, () => textIn<GitPanel>('new_file.dart').evaluate().isNotEmpty);
+    await settle(t, () => textIn<GitPanel>('tablet_file.dart').evaluate().isNotEmpty);
     expect(find.text('Коммит'), findsOneWidget);
-    expect(textIn<GitPanel>('new_file.dart'), findsOneWidget);
+    expect(textIn<GitPanel>('tablet_file.dart'), findsOneWidget);
     expect(textIn<GitPanel>('ИЗМЕНЕНИЯ'), findsOneWidget);
     await t.pumpWidget(const SizedBox());
     await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 200)));
