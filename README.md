@@ -22,6 +22,7 @@
 - **Редактор кода**: вкладки, подсветка (Dart, Kotlin, Java, Python, JS/TS, C/C++, Go, Rust, Shell, YAML, JSON, XML…), номера строк, автоотступ, undo/redo, панель символов `{ } ( ) ;` для экранной клавиатуры, Ctrl+S.
 - **▶ Запуск в одно касание**: IDE сама определяет тип проекта (Flutter, Dart, Android/Gradle, Node.js, Python, Rust, Go, CMake, Make) или открытого файла и подбирает команду. Можно выбрать другой вариант или задать свою команду.
 - **Интерактивный терминал**: полноценный PTY с цветами, вводом в программу (`input()`, `Scanner`, `readln()`), Ctrl/Esc/Tab/стрелками, несколькими вкладками. Для Flutter работают hot reload ⚡ и hot restart ↻.
+- **Git как в VS Code**: панель «Git» с подготовленными изменениями и изменениями, просмотр diff, stage/unstage/отмена изменений, коммит (и «Коммит и Push»), pull/push/sync/fetch, ветки, история, stash, remote, вход в GitHub по токену, init и clone. Изменённые файлы подсвечиваются в дереве, текущая ветка видна под заголовком.
 - **Языки и расширения**: Python, Node.js, C/C++, Java, Kotlin, Gradle, Go, Rust, Dart, Ruby, PHP, Git ставятся в Termux одной кнопкой.
 - **Мастер первого запуска**: проводит через установку Termux, одну команду подготовки и разрешение. Сервер IDE ставится и обновляется сам.
 - **Проекты**: шаблоны для 10+ языков, дерево файлов (создать, переименовать, удалить), сборка и установка APK.
@@ -79,11 +80,13 @@ lib/
   projects_page.dart   проекты, шаблоны
   ide_page.dart        IDE: файлы, вкладки, запуск
   editor.dart          редактор и подсветка
+  git.dart, git_panel.dart  Git: статус, diff, коммиты, ветки
   terminal_panel.dart  терминалы (xterm + PTY)
   runner.dart          определение проекта и команды запуска
   extensions.dart      языки и расширения
   server_manager.dart  установка и запуск сервера в Termux
 assets/termux/         server.py, start.sh, install.sh
+packages/xterm/        xterm.dart 4.0.0 (MIT) с исправлением Enter на экранной клавиатуре
 ```
 
 ## Лицензия
