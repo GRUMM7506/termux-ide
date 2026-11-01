@@ -11,5 +11,6 @@
 - Редактор: вкладки, подсветка 15+ языков, номера строк, автоотступ, undo/redo, панель символов.
 - ▶ Автозапуск: IDE сама определяет тип проекта (Flutter, Dart, Gradle/Android, Node, Python, Rust, Go, CMake, Make) или файла.
 - Настоящий интерактивный терминал (PTY): ввод в программу, цвета, Ctrl/Esc/стрелки, hot reload для Flutter.
+- 🤖 ИИ-агент: Claude Code и Codex прямо в проекте, вход по подписке (Claude Pro/Max, ChatGPT Plus/Pro) без API-ключей.
 - «Языки и расширения»: Python, Node.js, C/C++, Java, Kotlin, Gradle, Go, Rust, Dart, Ruby, PHP, Git — установка одной кнопкой.
 - Шаблоны новых проектов, сборка и установка APK.

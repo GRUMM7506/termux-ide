@@ -14,7 +14,13 @@ class Settings {
   Map<String, String> targetByProject = {};
   Map<String, String> customCmdByProject = {};
 
+  /// AI agent panel per project: agent, access mode, model, session ids.
+  Map<String, Map<String, String>> agentByProject = {};
+
   Settings._(this._file);
+
+  /// App files dir (agent chat history lives next to settings.json).
+  String get dir => _file.parent.path;
 
   static Future<Settings> load(String filesDir) async {
     final s = Settings._(File('$filesDir/settings.json'));
@@ -26,6 +32,8 @@ class Settings {
       s.recent = ((m['recent'] as List?) ?? []).cast<String>();
       s.targetByProject = ((m['target'] as Map?) ?? {}).cast<String, String>();
       s.customCmdByProject = ((m['customCmd'] as Map?) ?? {}).cast<String, String>();
+      s.agentByProject = ((m['agent'] as Map?) ?? {})
+          .map((k, v) => MapEntry(k as String, (v as Map).cast<String, String>()));
     } catch (_) {}
     if (s.token.length < 16) {
       final r = Random.secure();
@@ -48,5 +56,6 @@ class Settings {
         'recent': recent,
         'target': targetByProject,
         'customCmd': customCmdByProject,
+        'agent': agentByProject,
       }));
 }

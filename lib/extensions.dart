@@ -43,6 +43,16 @@ String pkgInstall(String pkgs) =>
 const _aapt2Fix = 'mkdir -p ~/.gradle && (grep -qs aapt2FromMavenOverride ~/.gradle/gradle.properties || '
     'echo "android.aapt2FromMavenOverride=\$PREFIX/bin/aapt2" >> ~/.gradle/gradle.properties)';
 
+/// Claude Code has no Android build (since 2.1.113): the community installer runs the
+/// official linux-arm64 binary through glibc-runner and keeps it updated.
+const claudeInstallCmd = r'command -v curl >/dev/null || pkg install -y curl; '
+    r'F="${TMPDIR:-$PREFIX/tmp}/claude-code-android-install.sh"; '
+    r'curl -fsSL https://raw.githubusercontent.com/ferrumclaudepilgrim/claude-code-android/main/install.sh -o "$F" '
+    r'&& bash "$F"';
+
+/// Codex is in the official Termux repository.
+final codexInstallCmd = pkgInstall('codex ripgrep');
+
 final langPacks = <LangPack>[
   LangPack(
     id: 'python', title: 'Python', tool: 'python', popular: true,
@@ -121,6 +131,18 @@ final langPacks = <LangPack>[
     description: 'PHP CLI и встроенный веб-сервер.',
     icon: Icons.web, color: const Color(0xFF777BB4),
     install: pkgInstall('php'), uninstall: 'pkg uninstall -y php',
+  ),
+  LangPack(
+    id: 'claude', title: 'Claude Code', tool: 'claude',
+    description: 'ИИ-агент Anthropic. Вход по подписке Pro/Max. Панель «Агент» в проекте.',
+    icon: Icons.smart_toy_outlined, color: const Color(0xFFD97757),
+    install: claudeInstallCmd,
+  ),
+  LangPack(
+    id: 'codex', title: 'Codex', tool: 'codex',
+    description: 'ИИ-агент OpenAI. Вход через ChatGPT (Plus/Pro). Панель «Агент» в проекте.',
+    icon: Icons.smart_toy, color: const Color(0xFF10A37F),
+    install: codexInstallCmd, uninstall: 'pkg uninstall -y codex',
   ),
   LangPack(
     id: 'git', title: 'Git', tool: 'git', popular: true,

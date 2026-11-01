@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import 'agent.dart';
 import 'api.dart';
 import 'dialogs.dart';
 import 'editor.dart';
@@ -76,7 +77,15 @@ class _IdePageState extends State<IdePage> {
   ProjectInfo? _project;
   late List<String> _tools = widget.tools;
   late final GitController _git = GitController(widget.api, widget.root);
-  int _side = 0; // 0 = files, 1 = git
+  int _side = 0; // 0 = files, 1 = git, 2 = agent
+  late final AgentController _agent = AgentController(
+    api: widget.api,
+    settings: widget.settings,
+    root: widget.root,
+    onFilesChanged: _onAgentChanged,
+    onBeforeSend: _saveAll,
+    currentFile: () => _cur?.path,
+  );
   String _home = '/data/data/com.termux/files/home';
 
   Api get api => widget.api;
@@ -105,6 +114,7 @@ class _IdePageState extends State<IdePage> {
     _hub.closeAll();
     _hub.dispose();
     _git.dispose();
+    _agent.dispose();
     for (final f in _files) {
       f.disposeLater();
     }
@@ -536,6 +546,65 @@ class _IdePageState extends State<IdePage> {
     await _git.refresh();
   }
 
+  // ------------------------------------------------------------------ agent
+
+  /// The agent changed files: refresh the tree, Git and open editors without unsaved edits.
+  Future<void> _onAgentChanged() async {
+    if (!mounted) return;
+    _tree.currentState?.refresh();
+    _git.refresh();
+    for (final f in List.of(_files)) {
+      if (f.dirty) continue;
+      try {
+        if (!await api.exists(f.path)) continue;
+        final r = await api.readFile(f.path);
+        if (!mounted || f.dirty || r.binary || r.content == f.saved || !_files.contains(f)) continue;
+        final off = f.ctrl.selection.baseOffset;
+        f.saved = r.content;
+        f.ctrl.value = TextEditingValue(
+          text: r.content,
+          selection: TextSelection.collapsed(offset: off < 0 ? 0 : math.min(off, r.content.length)),
+        );
+      } catch (_) {}
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _openAgent() {
+    setState(() => _side = 2);
+    final size = MediaQuery.sizeOf(context);
+    final wide = size.width >= 840 && size.height >= 500;
+    if (!wide) _scaffold.currentState?.openDrawer();
+  }
+
+  Future<void> _agentRunPage(String cmd, String title) async {
+    await runInTerminalPage(context, api, cmd: cmd, cwd: widget.root, title: title);
+    await _refreshTools();
+  }
+
+  /// The agent's own terminal UI (claude / codex) in the terminal panel, maximized.
+  Future<void> _agentTerminal(String cmd, String title) async {
+    try {
+      final tab = await TermTab.start(api, cwd: widget.root, cmd: cmd, title: title);
+      if (!mounted) {
+        tab.dispose();
+        return;
+      }
+      _hub.add(tab);
+      setState(() {
+        _panelOpen = true;
+        _panelMax = true;
+      });
+      if (_scaffold.currentState?.isDrawerOpen ?? false) _scaffold.currentState!.closeDrawer();
+      tab.focus.requestFocus();
+      unawaited(tab.exitCode.addListenerOnce(() {
+        if (mounted) _onAgentChanged();
+      }));
+    } catch (e) {
+      _snack('Не удалось открыть терминал: $e');
+    }
+  }
+
   Future<void> _openAbs(String path) async {
     if (_scaffold.currentState?.isDrawerOpen ?? false) _scaffold.currentState!.closeDrawer();
     try {
@@ -633,8 +702,8 @@ class _IdePageState extends State<IdePage> {
       if (r == null || r == 2) return;
       if (r == 0) await _saveAll();
     }
-    if (_hub.tabs.any((t) => t.running)) {
-      final r = await askChoice(context, 'Запущенные программы будут остановлены.', ['Закрыть проект', 'Отмена']);
+    if (_hub.tabs.any((t) => t.running) || _agent.busy) {
+      final r = await askChoice(context, 'Запущенные программы${_agent.busy ? ' и агент' : ''} будут остановлены.', ['Закрыть проект', 'Отмена']);
       if (r != 0) return;
     }
     _closing = true;
@@ -688,6 +757,7 @@ class _IdePageState extends State<IdePage> {
             child: Row(children: [
               tab(0, Icons.folder_copy_outlined, 'Файлы'),
               tab(1, Icons.account_tree_outlined, 'Git', badge: _git.count),
+              tab(2, Icons.smart_toy_outlined, 'Агент'),
             ]),
           ),
         ),
@@ -701,6 +771,10 @@ class _IdePageState extends State<IdePage> {
               onRunInTerminal: _runInPanel,
               onInstallGit: _installGit,
             ),
+            // Built only while visible: opening a project must not start the agent CLI.
+            _side == 2
+                ? AgentPanel(agent: _agent, onRunPage: _agentRunPage, onOpenTerminal: _agentTerminal)
+                : const SizedBox.shrink(),
           ]),
         ),
       ]),
@@ -812,7 +886,7 @@ class _IdePageState extends State<IdePage> {
         drawer: wide
             ? null
             : Drawer(
-                width: math.min(340.0, size.width * .85),
+                width: _side == 2 ? math.min(520.0, size.width * .94) : math.min(340.0, size.width * .85),
                 child: SafeArea(
                   child: Column(children: [
                     ListTile(
@@ -843,6 +917,14 @@ class _IdePageState extends State<IdePage> {
               IconButton(tooltip: 'Стоп', onPressed: runTab!.stop, icon: const Icon(Icons.stop, color: Colors.redAccent))
             else
               IconButton(tooltip: 'Запуск', onPressed: _run, icon: const Icon(Icons.play_arrow, color: Colors.greenAccent)),
+            ListenableBuilder(
+              listenable: _agent,
+              builder: (_, __) => IconButton(
+                tooltip: 'Агент',
+                onPressed: _openAgent,
+                icon: Icon(Icons.smart_toy_outlined, color: _agent.busy ? Colors.amber : null),
+              ),
+            ),
             IconButton(
               tooltip: 'Терминал',
               onPressed: () {
@@ -916,7 +998,7 @@ class _IdePageState extends State<IdePage> {
           top: false,
           child: wide
               ? Row(children: [
-                  SizedBox(width: 290, child: _sidePanel(tree)),
+                  SizedBox(width: _side == 2 ? 400 : 290, child: _sidePanel(tree)),
                   const VerticalDivider(width: 1, color: Color(0xFF333333)),
                   Expanded(child: main),
                 ])

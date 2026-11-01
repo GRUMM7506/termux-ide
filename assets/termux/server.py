@@ -25,7 +25,7 @@ import termios
 import time
 import urllib.parse
 
-VERSION = "2.0.2"
+VERSION = "2.1.0"
 HOME = os.environ.get("HOME", "/data/data/com.termux/files/home")
 DIR = os.path.join(HOME, ".termux-ide")
 PORT = 8765
@@ -37,10 +37,30 @@ MAX_READ = 8 * 1024 * 1024
 TOOLS = [
     "flutter", "dart", "python", "pip", "node", "npm", "java", "javac", "kotlinc", "gradle",
     "clang", "clang++", "make", "cmake", "go", "cargo", "rustc", "ruby", "php", "lua",
-    "git", "adb", "aapt2",
+    "git", "adb", "aapt2", "claude", "codex",
 ]
 
+BIN_DIR = os.path.join(DIR, "bin")
+URL_OSC = "\x1b]7770;"  # private OSC: "open this URL in the app" (see OPEN_URL_SH)
+MAX_PROC_LINE = 64 * 1024 * 1024
+PROC_BUFFER = 20_000
+
+# xdg-open / $BROWSER replacement for terminals started by the IDE. Claude Code and
+# Codex open the sign-in page with it; the URL goes to the app, which opens the browser
+# (Android does not let Termux start activities from the background).
+OPEN_URL_SH = r"""#!__PREFIX__/bin/sh
+# Termux IDE: открывает ссылки через приложение (вход в Claude Code / Codex).
+case "$1" in
+  http://*|https://*)
+    printf '%s\n' "$1" > "$HOME/.termux-ide/last-url" 2>/dev/null
+    if { printf '\033]7770;%s\007' "$1" > /dev/tty; } 2>/dev/null; then exit 0; fi
+    exec termux-open-url "$1" ;;
+esac
+exec termux-open "$@"
+"""
+
 sessions = {}
+procs = {}
 _next_sid = 1
 _tools_cache = {"t": 0.0, "tools": []}
 
@@ -55,6 +75,23 @@ def abs_path(p):
     if not p.startswith("/"):
         p = os.path.join(HOME, p)
     return os.path.normpath(p)
+
+
+def child_env():
+    env = dict(os.environ)
+    env["TERMUX_IDE"] = "1"
+    env["PATH"] = BIN_DIR + os.pathsep + env.get("PATH", "")
+    env["BROWSER"] = os.path.join(BIN_DIR, "xdg-open")
+    return env
+
+
+def install_helpers():
+    os.makedirs(BIN_DIR, exist_ok=True)
+    prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
+    path = os.path.join(BIN_DIR, "xdg-open")
+    with open(path, "w") as f:
+        f.write(OPEN_URL_SH.replace("__PREFIX__", prefix))
+    os.chmod(path, 0o755)
 
 
 # --------------------------------------------------------------------------- PTY sessions
@@ -75,11 +112,11 @@ class Session:
         self.scroll_len = 0
         self.clients = set()
         self.decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._carry = ""
 
-        env = dict(os.environ)
+        env = child_env()
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
-        env["TERMUX_IDE"] = "1"
         argv = ["bash", "-ic", cmd] if cmd else ["bash", "-i"]
 
         pid, fd = pty.fork()
@@ -148,13 +185,33 @@ class Session:
         for c in list(self.clients):
             c.send_text(msg)
 
+    def _take_urls(self, text):
+        """Cuts URL_OSC markers out of the output and sends them to the app as {t: url}."""
+        text = self._carry + text
+        self._carry = ""
+        while True:
+            i = text.find(URL_OSC)
+            if i < 0:
+                return text
+            j = text.find("\x07", i)
+            if j < 0:
+                if len(text) - i < 16384:
+                    self._carry, text = text[i:], text[:i]
+                return text
+            url = text[i + len(URL_OSC):j]
+            text = text[:i] + text[j + 1:]
+            log(f"session {self.id} open url")
+            msg = json.dumps({"t": "url", "d": url})
+            for c in list(self.clients):
+                c.send_text(msg)
+
     def _readable(self):
         try:
             data = os.read(self.fd, 65536)
         except OSError:
             data = b""
         if data:
-            text = self.decoder.decode(data)
+            text = self._take_urls(self.decoder.decode(data))
             if text:
                 self._emit(text)
             return
@@ -194,6 +251,184 @@ class Session:
         sessions.pop(self.id, None)
 
 
+# --------------------------------------------------------------------------- pipe processes
+# Used by the AI agent panel: `claude -p --output-format stream-json`, `codex exec --json`.
+# stdout is delivered line by line (JSONL), stderr as text. Messages are numbered (n) and
+# buffered, so the app can reconnect and skip what it has already seen.
+
+
+class ProcSession:
+    def __init__(self, cmd, cwd, use_stdin, title):
+        global _next_sid
+        self.id = _next_sid
+        _next_sid += 1
+        self.cmd = cmd
+        self.cwd = cwd
+        self.use_stdin = use_stdin
+        self.title = title or "proc"
+        self.code = None
+        self.ended = None
+        self.buffer = []
+        self.seq = 0
+        self.clients = set()
+        self.proc = None
+
+    @property
+    def running(self):
+        return self.code is None
+
+    def info(self):
+        return {"id": self.id, "title": self.title, "running": self.running, "code": self.code}
+
+    async def start(self):
+        script = "{ [ -f ~/.bashrc ] && . ~/.bashrc; } >/dev/null 2>&1 </dev/null; " + self.cmd
+        self.proc = await asyncio.create_subprocess_exec(
+            "bash", "-c", script, cwd=self.cwd, env=child_env(),
+            stdin=asyncio.subprocess.PIPE if self.use_stdin else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            limit=MAX_PROC_LINE, start_new_session=True)
+        log(f"proc {self.id} started pid={self.proc.pid} cmd={self.cmd!r} cwd={self.cwd}")
+        out = asyncio.ensure_future(self._pump_lines())
+        err = asyncio.ensure_future(self._pump_err())
+        asyncio.ensure_future(self._wait(out, err))
+
+    def _emit(self, obj):
+        self.seq += 1
+        obj["n"] = self.seq
+        msg = json.dumps(obj)
+        self.buffer.append(msg)
+        if len(self.buffer) > PROC_BUFFER:
+            del self.buffer[:len(self.buffer) - PROC_BUFFER]
+        for c in list(self.clients):
+            c.send_text(msg)
+
+    async def _pump_lines(self):
+        r = self.proc.stdout
+        while True:
+            try:
+                line = await r.readline()
+            except ValueError:  # line longer than the limit: dropped by the reader
+                continue
+            if not line:
+                return
+            text = line.decode("utf-8", errors="replace").rstrip("\r\n")
+            if text:
+                self._emit({"t": "o", "d": text})
+
+    async def _pump_err(self):
+        r = self.proc.stderr
+        dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        while True:
+            data = await r.read(65536)
+            if not data:
+                return
+            text = dec.decode(data)
+            if text:
+                self._emit({"t": "e", "d": text})
+
+    async def _wait(self, out, err):
+        code = await self.proc.wait()
+        try:
+            await asyncio.wait_for(asyncio.gather(out, err), 5)
+        except Exception:
+            pass
+        self.code = code
+        self.ended = time.time()
+        self._emit({"t": "exit", "code": code})
+        log(f"proc {self.id} exited code={code}")
+
+    def write(self, text):
+        if self.running and self.use_stdin and self.proc.stdin and not self.proc.stdin.is_closing():
+            try:
+                self.proc.stdin.write(text.encode())
+            except Exception:
+                pass
+
+    def eof(self):
+        if self.proc and self.proc.stdin and not self.proc.stdin.is_closing():
+            try:
+                self.proc.stdin.close()
+            except Exception:
+                pass
+
+    def signal(self, name):
+        if not self.running or not self.proc:
+            return
+        sig = {"int": signal.SIGINT, "term": signal.SIGTERM, "kill": signal.SIGKILL}.get(name)
+        if sig is None:
+            return
+        try:
+            os.killpg(self.proc.pid, sig)
+        except OSError:
+            try:
+                self.proc.send_signal(sig)
+            except Exception:
+                pass
+        if sig != signal.SIGKILL:
+            asyncio.get_running_loop().call_later(4, lambda: self.signal("kill"))
+
+    def close(self):
+        self.signal("term")
+        procs.pop(self.id, None)
+
+
+async def ws_proc(reader, writer, headers, q):
+    ws = ws_accept(reader, writer, headers)
+    pid = int(q.get("id", "0") or 0)
+    if pid and pid in procs:
+        p = procs[pid]
+    elif pid:
+        ws.send_text(json.dumps({"t": "gone"}))
+        ws.close()
+        return
+    else:
+        p = ProcSession(q.get("cmd", ""), abs_path(q.get("cwd")), q.get("stdin", "1") == "1", q.get("title", ""))
+        procs[p.id] = p
+        try:
+            await p.start()
+        except Exception as e:
+            procs.pop(p.id, None)
+            ws.send_text(json.dumps({"t": "error", "d": str(e)}))
+            ws.close()
+            return
+    p.clients.add(ws)
+    ws.send_text(json.dumps({"t": "hello", **p.info()}))
+    since = int(q.get("since", "0") or 0)
+    for msg in list(p.buffer):
+        if json.loads(msg).get("n", 0) > since:
+            ws.send_text(msg)
+    try:
+        while True:
+            raw = await ws.recv()
+            if raw is None:
+                break
+            try:
+                m = json.loads(raw)
+            except ValueError:
+                continue
+            t = m.get("t")
+            if t == "i":
+                p.write(m.get("d", ""))
+                try:
+                    await p.proc.stdin.drain()
+                except Exception:
+                    pass
+            elif t == "eof":
+                p.eof()
+            elif t == "sig":
+                p.signal(m.get("s", ""))
+            elif t == "close":
+                p.close()
+                break
+            try:
+                await writer.drain()
+            except ConnectionError:
+                break
+    finally:
+        p.clients.discard(ws)
+        ws.close()
+
+
 async def gc_sessions():
     while True:
         await asyncio.sleep(60)
@@ -201,6 +436,9 @@ async def gc_sessions():
         for s in list(sessions.values()):
             if not s.running and not s.clients and now - (s.ended or now) > 600:
                 sessions.pop(s.id, None)
+        for p in list(procs.values()):
+            if not p.running and not p.clients and now - (p.ended or now) > 600:
+                procs.pop(p.id, None)
 
 
 # --------------------------------------------------------------------------- WebSocket
@@ -270,13 +508,17 @@ class WsConn:
                 pass
 
 
-async def ws_term(reader, writer, headers, q):
+def ws_accept(reader, writer, headers):
     key = headers.get("sec-websocket-key", "")
     accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
     writer.write((
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
         f"Sec-WebSocket-Accept: {accept}\r\n\r\n").encode())
-    ws = WsConn(reader, writer)
+    return WsConn(reader, writer)
+
+
+async def ws_term(reader, writer, headers, q):
+    ws = ws_accept(reader, writer, headers)
 
     sid = int(q.get("id", "0") or 0)
     if sid and sid in sessions:
@@ -358,9 +600,9 @@ def list_dir(path):
     return out
 
 
-async def run_exec(cmd, cwd, timeout=120):
+async def run_exec(cmd, cwd, timeout=120, env=None):
     p = await asyncio.create_subprocess_exec(
-        "bash", "-c", cmd, cwd=cwd, stdin=asyncio.subprocess.DEVNULL,
+        "bash", "-c", cmd, cwd=cwd, env=env, stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         out, err = await asyncio.wait_for(p.communicate(), timeout)
@@ -368,6 +610,38 @@ async def run_exec(cmd, cwd, timeout=120):
         p.kill()
         return {"code": -1, "stdout": "", "stderr": "timeout"}
     return {"code": p.returncode, "stdout": out.decode(errors="replace"), "stderr": err.decode(errors="replace")}
+
+
+async def agent_status(name):
+    """Is the CLI agent installed and signed in? name: claude | codex."""
+    pre = "{ [ -f ~/.bashrc ] && . ~/.bashrc; } >/dev/null 2>&1 </dev/null; "
+    env = child_env()
+    r = await run_exec(pre + f"command -v {name}", HOME, 30, env)
+    path = r["stdout"].strip().splitlines()[-1] if r["stdout"].strip() else ""
+    if r["code"] != 0 or not path:
+        return {"installed": False, "loggedIn": False}
+    v = await run_exec(pre + f"{name} --version", HOME, 90, env)
+    version = (v["stdout"].strip() or v["stderr"].strip()).splitlines()
+    res = {"installed": True, "path": path, "version": version[-1][:80] if version else "",
+           "loggedIn": False, "detail": ""}
+    if v["code"] != 0:
+        res["error"] = (v["stderr"] or v["stdout"]).strip()[-600:]
+    if name == "claude":
+        a = await run_exec(pre + "claude auth status --json", HOME, 60, env)
+        try:
+            d = json.loads(a["stdout"][a["stdout"].index("{"):])
+            res["loggedIn"] = bool(d.get("loggedIn"))
+            res["detail"] = " · ".join(str(d[k]) for k in ("email", "subscriptionType", "authMethod")
+                                       if d.get(k) and d.get(k) is not True)
+        except (ValueError, AttributeError):
+            res["loggedIn"] = a["code"] == 0 and "not logged" not in (a["stdout"] + a["stderr"]).lower()
+            res["detail"] = (a["stdout"] or a["stderr"]).strip()[:200]
+    else:
+        a = await run_exec(pre + "codex login status", HOME, 60, env)
+        text = (a["stdout"] + "\n" + a["stderr"]).strip()
+        res["loggedIn"] = a["code"] == 0 and "not logged" not in text.lower()
+        res["detail"] = text.splitlines()[0][:200] if text else ""
+    return res
 
 
 async def api(method, path, q, body):
@@ -412,6 +686,10 @@ async def api(method, path, q, body):
         return {"ok": True}
     if path == "/api/exec":
         return await run_exec(body["cmd"], abs_path(body.get("cwd")), int(body.get("timeout", 120)))
+    if path == "/api/agent/status":
+        names = [n for n in (q.get("agent") or "claude,codex").split(",") if n in ("claude", "codex")]
+        results = await asyncio.gather(*(agent_status(n) for n in names))
+        return dict(zip(names, results))
     if path == "/api/sessions":
         return {"sessions": [s.info() for s in sessions.values()]}
     if path == "/api/session/close":
@@ -471,6 +749,9 @@ async def handle(reader, writer):
             return
         if u.path == "/ws/term" and headers.get("upgrade", "").lower() == "websocket":
             await ws_term(reader, writer, headers, q)
+            return
+        if u.path == "/ws/proc" and headers.get("upgrade", "").lower() == "websocket":
+            await ws_proc(reader, writer, headers, q)
             return
         body = {}
         raw = await read_body(reader, headers)
@@ -544,6 +825,10 @@ async def main():
     if len(sys.argv) > 2:
         PORT = int(sys.argv[2])
     os.makedirs(DIR, exist_ok=True)
+    try:
+        install_helpers()
+    except OSError as e:
+        log("install_helpers failed:", e)
     kill_previous()
     with open(os.path.join(DIR, "server.pid"), "w") as f:
         f.write(str(os.getpid()))
@@ -570,6 +855,8 @@ async def main():
     log("stopping")
     for s in list(sessions.values()):
         s.close()
+    for p in list(procs.values()):
+        p.close()
     server.close()
     try:
         os.remove(os.path.join(DIR, "server.pid"))

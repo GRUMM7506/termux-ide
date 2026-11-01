@@ -1,9 +1,39 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
 
 import 'api.dart';
+import 'native.dart';
+
+final _ansi = RegExp(r'\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\)|[@-Z\\-_])');
+final _loginUrl = RegExp(
+    r'https://(?:claude\.ai|claude\.com|platform\.claude\.com|console\.anthropic\.com|auth\.openai\.com)/[^\s\x07]+');
+final _urlPiece = RegExp(r"^[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$");
+
+/// Last sign-in link (Claude Code / Codex) in terminal output. Joins a link that the
+/// program hard-wrapped onto several lines.
+String? findLoginUrl(String output) {
+  final lines = output.replaceAll(_ansi, '').split(RegExp(r'\r\n|\n|\r'));
+  String? found;
+  for (var i = 0; i < lines.length; i++) {
+    final line = lines[i].replaceAll('│', ' ').trimRight();
+    final m = _loginUrl.allMatches(line).lastOrNull;
+    if (m == null) continue;
+    var url = m.group(0)!;
+    if (m.end == line.length) {
+      for (var j = i + 1; j < lines.length; j++) {
+        final next = lines[j].replaceAll('│', ' ').trim();
+        if (next.isEmpty || !_urlPiece.hasMatch(next) || next.startsWith('http')) break;
+        url += next;
+        i = j;
+      }
+    }
+    found = url;
+  }
+  return found;
+}
 
 /// One terminal tab = one PTY session on the server + an xterm emulator.
 class TermTab {
@@ -14,8 +44,13 @@ class TermTab {
   final bool hotReload;
   final ValueNotifier<int?> exitCode = ValueNotifier(null);
   final ValueNotifier<bool> ctrl = ValueNotifier(false);
+
+  /// Sign-in link seen in the output (shown as a bar with «Открыть»).
+  final ValueNotifier<String?> loginUrl = ValueNotifier(null);
   final FocusNode focus = FocusNode();
   StreamSubscription<String>? _sub;
+  StreamSubscription<String>? _urlSub;
+  String _tail = '';
   bool _disposed = false;
 
   TermTab._(this.title, this.session, this.terminal, this.isRun, this.hotReload);
@@ -33,13 +68,35 @@ class TermTab {
     final terminal = Terminal(maxLines: 10000);
     final s = await api.openTerminal(cmd: cmd, cwd: cwd, title: title);
     final tab = TermTab._(title, s, terminal, isRun, hotReload);
-    tab._sub = s.output.listen(terminal.write);
+    tab._sub = s.output.listen((d) {
+      terminal.write(d);
+      tab._scanForUrl(d);
+    });
+    // The program asked to open a link (xdg-open / $BROWSER hook in server.py).
+    tab._urlSub = s.urls.listen((u) {
+      if (tab._disposed) return;
+      tab.loginUrl.value = u;
+      Native.openUrl(u).catchError((Object _) {});
+    });
     terminal.onOutput = (d) => s.input(tab._applyCtrl(d));
     terminal.onResize = (w, h, pw, ph) => s.resize(w, h);
     unawaited(s.exitCode.then((c) {
       if (!tab._disposed) tab.exitCode.value = c;
     }));
     return tab;
+  }
+
+  void _scanForUrl(String d) {
+    if (!d.contains('http') && !_tail.contains('http')) return;
+    _tail = _tail + d;
+    if (_tail.length > 12000) _tail = _tail.substring(_tail.length - 12000);
+    final u = findLoginUrl(_tail);
+    if (u != null && u != loginUrl.value && !_disposed) loginUrl.value = u;
+  }
+
+  Future<void> paste() async {
+    final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+    if (text != null && text.isNotEmpty) terminal.paste(text);
   }
 
   /// Sticky Ctrl from the extra-keys bar: the next typed letter becomes Ctrl+letter.
@@ -68,10 +125,12 @@ class TermTab {
     if (_disposed) return;
     _disposed = true;
     _sub?.cancel();
+    _urlSub?.cancel();
     session.close();
     focus.dispose();
     exitCode.dispose();
     ctrl.dispose();
+    loginUrl.dispose();
   }
 }
 
@@ -156,6 +215,7 @@ class TermView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Column(children: [
+      _LoginUrlBar(tab: tab),
       Expanded(
         child: TerminalView(
           tab.terminal,
@@ -169,6 +229,53 @@ class TermView extends StatelessWidget {
       ),
       if (showKeys) TerminalKeysBar(tab: tab),
     ]);
+  }
+}
+
+/// «Ссылка для входа» — the sign-in link from the output, one tap to open or copy it.
+class _LoginUrlBar extends StatelessWidget {
+  final TermTab tab;
+  const _LoginUrlBar({required this.tab});
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<String?>(
+      valueListenable: tab.loginUrl,
+      builder: (context, url, _) {
+        if (url == null) return const SizedBox.shrink();
+        return Material(
+          color: const Color(0xFF0E3A5C),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+            child: Row(children: [
+              const Icon(Icons.login, size: 18, color: Colors.lightBlueAccent),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text('Ссылка для входа. После входа вернись сюда; если попросят код — вставь его кнопкой ⎘.',
+                    style: TextStyle(fontSize: 12.5)),
+              ),
+              TextButton(onPressed: () => Native.openUrl(url), child: const Text('Открыть')),
+              IconButton(
+                tooltip: 'Скопировать ссылку',
+                iconSize: 18,
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: url));
+                  ScaffoldMessenger.maybeOf(context)
+                      ?.showSnackBar(const SnackBar(content: Text('Ссылка скопирована')));
+                },
+                icon: const Icon(Icons.copy),
+              ),
+              IconButton(
+                tooltip: 'Скрыть',
+                iconSize: 18,
+                onPressed: () => tab.loginUrl.value = null,
+                icon: const Icon(Icons.close),
+              ),
+            ]),
+          ),
+        );
+      },
+    );
   }
 }
 
@@ -196,6 +303,7 @@ class TerminalKeysBar extends StatelessWidget {
         builder: (_, ctrlOn, __) => SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: Row(children: [
+            k('⎘', tab.paste),
             k('ESC', () => tab.key(TerminalKey.escape)),
             k('TAB', () => tab.key(TerminalKey.tab)),
             k('CTRL', () => tab.ctrl.value = !ctrlOn, active: ctrlOn),
