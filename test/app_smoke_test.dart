@@ -218,8 +218,14 @@ void main() {
     await settle(t, () => find.textContaining(' main*').evaluate().isNotEmpty);
     expect(find.textContaining(' main*'), findsOneWidget); // branch + dirty marker in the run bar
 
+    final scaffold = t.state<ScaffoldState>(find.byType(Scaffold).first);
     await t.tap(find.byTooltip('Open navigation menu'));
-    await t.pump(const Duration(seconds: 1)); // drawer animation
+    for (var i = 0; i < 10; i++) {
+      await t.pump(const Duration(milliseconds: 100));
+      debugPrint('drawer step $i open=${scaffold.isDrawerOpen} '
+          'git@${find.text('Git').evaluate().isEmpty ? '-' : t.getCenter(find.text('Git'))}');
+    }
+    expect(scaffold.isDrawerOpen, isTrue, reason: 'drawer should stay open');
     await t.tap(find.text('Git'));
     await settle(t, () => find.text('new_file.dart').evaluate().isNotEmpty);
     expect(find.text('Коммит'), findsOneWidget);
