@@ -122,12 +122,19 @@ class _IdePageState extends State<IdePage> {
       if (!mounted) return;
       setState(() => _project = p);
       if (_files.isEmpty) {
-        for (final f in ['lib/main.dart', 'main.py', 'Main.kt', 'Main.java', 'main.c', 'main.cpp', 'main.js',
-            'main.go', 'src/main.rs', 'index.js', 'README.md']) {
+        // Well-known entry points first, then any runnable file in the project root.
+        final runnable = p.rootNames.where((n) => fileTarget(n) != null).toList()..sort();
+        final candidates = [
+          'lib/main.dart', 'main.py', 'Main.kt', 'Main.java', 'main.c', 'main.cpp', 'main.js',
+          'main.go', 'src/main.rs', 'index.js',
+          ...runnable,
+          'README.md',
+        ];
+        for (final f in candidates) {
           if (!p.rootNames.contains(f.split('/').first)) continue;
           try {
             await _open('${widget.root}/$f');
-            break;
+            if (_files.isNotEmpty) break;
           } catch (_) {}
         }
       }
