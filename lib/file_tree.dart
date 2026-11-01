@@ -12,6 +12,10 @@ class FileTree extends StatefulWidget {
   final void Function(String dir) onNewFile;
   final void Function(String dir) onNewFolder;
 
+  /// Git colors for entries (null = default) and a listenable to repaint on change.
+  final Color? Function(String path, bool dir)? colorFor;
+  final Listenable? decorations;
+
   const FileTree({
     super.key,
     required this.api,
@@ -21,6 +25,8 @@ class FileTree extends StatefulWidget {
     required this.onNewFile,
     required this.onNewFolder,
     this.activePath,
+    this.colorFor,
+    this.decorations,
   });
 
   @override
@@ -155,7 +161,9 @@ class FileTreeState extends State<FileTree> {
             child: Text(_error!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
           ),
         Expanded(
-          child: ListView.builder(
+          child: ListenableBuilder(
+           listenable: widget.decorations ?? const AlwaysStoppedAnimation(0),
+           builder: (context, _) => ListView.builder(
             itemCount: items.length,
             itemBuilder: (_, i) {
               final (e, depth) = items[i];
@@ -185,7 +193,10 @@ class FileTreeState extends State<FileTree> {
                         child: Text(
                           e.name,
                           overflow: TextOverflow.ellipsis,
-                          style: TextStyle(fontSize: 13.5, color: dim ? Colors.white38 : Colors.white),
+                          style: TextStyle(
+                            fontSize: 13.5,
+                            color: widget.colorFor?.call(e.path, e.dir) ?? (dim ? Colors.white38 : Colors.white),
+                          ),
                         ),
                       ),
                     ]),
@@ -193,6 +204,7 @@ class FileTreeState extends State<FileTree> {
                 ),
               );
             },
+           ),
           ),
         ),
       ]),

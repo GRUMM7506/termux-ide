@@ -42,6 +42,53 @@ class _ProjectsPageState extends State<ProjectsPage> {
     if (path != null) widget.onOpen(path);
   }
 
+  Future<void> _clone() async {
+    final url = TextEditingController();
+    final name = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Клонировать репозиторий'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+            controller: url,
+            autofocus: true,
+            keyboardType: TextInputType.url,
+            autocorrect: false,
+            decoration: const InputDecoration(labelText: 'URL', hintText: 'https://github.com/user/repo.git'),
+            onChanged: (v) {
+              final m = RegExp(r'([^/:]+?)(\.git)?/?$').firstMatch(v.trim());
+              name.text = m?.group(1) ?? '';
+            },
+          ),
+          TextField(controller: name, decoration: const InputDecoration(labelText: 'Папка в ~/projects')),
+          const SizedBox(height: 8),
+          const Text('Для приватных репозиториев сначала войди в GitHub: панель Git → ⋮ → «Вход в GitHub».',
+              style: TextStyle(fontSize: 12, color: Colors.white54)),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Клонировать')),
+        ],
+      ),
+    );
+    final u = url.text.trim(), n = name.text.trim();
+    if (ok != true || u.isEmpty || n.isEmpty || !mounted) return;
+    if (!widget.tools.contains('git')) {
+      final pack = langPacks.firstWhere((p) => p.id == 'git');
+      final code = await runInTerminalPage(context, widget.api, cmd: pack.install!, cwd: home, title: 'Установка: Git');
+      if (code != 0 || !mounted) return;
+      widget.onToolsChanged();
+    }
+    final parent = '$home/projects';
+    await widget.api.mkdir(parent);
+    if (!mounted) return;
+    final q = "'${u.replaceAll("'", "")}'";
+    final code = await runInTerminalPage(context, widget.api,
+        cmd: 'git clone --progress $q "${n.replaceAll('"', '')}"', cwd: parent, title: 'git clone');
+    if (code == 0) widget.onOpen('$parent/$n');
+  }
+
   @override
   Widget build(BuildContext context) {
     final st = widget.settings;
@@ -56,7 +103,9 @@ class _ProjectsPageState extends State<ProjectsPage> {
           IconButton(tooltip: 'Как пользоваться', onPressed: widget.onShowGuide, icon: const Icon(Icons.help_outline)),
         ],
       ),
-      body: ListView(padding: const EdgeInsets.all(16), children: [
+      body: SafeArea(
+        top: false,
+        child: ListView(padding: const EdgeInsets.all(16), children: [
         Wrap(spacing: 12, runSpacing: 12, children: [
           FilledButton.icon(onPressed: _newProject, icon: const Icon(Icons.add), label: const Text('Новый проект')),
           OutlinedButton.icon(
@@ -66,6 +115,11 @@ class _ProjectsPageState extends State<ProjectsPage> {
             },
             icon: const Icon(Icons.folder_open),
             label: const Text('Открыть папку'),
+          ),
+          OutlinedButton.icon(
+            onPressed: _clone,
+            icon: const Icon(Icons.cloud_download_outlined),
+            label: const Text('Клонировать репозиторий'),
           ),
           OutlinedButton.icon(
             onPressed: () async {
@@ -118,6 +172,7 @@ class _ProjectsPageState extends State<ProjectsPage> {
             ),
           ),
       ]),
+      ),
     );
   }
 }

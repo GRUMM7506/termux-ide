@@ -44,6 +44,8 @@ class TermTab {
 
   /// Sticky Ctrl from the extra-keys bar: the next typed letter becomes Ctrl+letter.
   String _applyCtrl(String d) {
+    // A real terminal sends CR for Enter; soft keyboards may deliver "\n" as text.
+    if (d == '\n') d = '\r';
     if (!ctrl.value || d.length != 1) return d;
     ctrl.value = false;
     final c = d.toUpperCase().codeUnitAt(0);

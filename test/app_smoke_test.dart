@@ -5,8 +5,10 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:xterm/xterm.dart';
 import 'package:termux_ide/api.dart';
 import 'package:termux_ide/extensions.dart';
+import 'package:termux_ide/git.dart';
 import 'package:termux_ide/ide_page.dart';
 import 'package:termux_ide/main.dart';
 import 'package:termux_ide/projects_page.dart';
@@ -100,6 +102,131 @@ void main() {
     await settle(t, () => find.text('Python').evaluate().isNotEmpty);
     expect(find.text('Python'), findsOneWidget);
     expect(find.text('Kotlin'), findsOneWidget);
+  });
+
+  testWidgets('terminal keeps the keyboard when it opens (portrait) and Enter works', (t) async {
+    phone(t);
+    mockNative();
+    final api = Api(token, port: port);
+    final st = (await t.runAsync(() => Settings.load(home.path)))!;
+    final tools = (await t.runAsync(() => api.info()))!.tools;
+    final root = '${home.path}/projects/hello';
+    await t.pumpWidget(MaterialApp(
+      theme: ThemeData.dark(),
+      home: IdePage(api: api, settings: st, root: root, tools: tools, onClose: () {}),
+    ));
+    await settle(t, () => find.textContaining('Авто').evaluate().isNotEmpty);
+
+    // Open a shell and focus it.
+    await t.tap(find.byTooltip('Терминал'));
+    await settle(t, () => find.byType(TerminalView).evaluate().isNotEmpty);
+    await t.tap(find.byType(TerminalView));
+    await t.pump();
+    final before = t.state(find.byType(TerminalView));
+    expect(t.testTextInput.hasAnyClients, isTrue);
+
+    // The on-screen keyboard appears: the terminal must NOT be re-created.
+    t.view.viewInsets = const FakeViewPadding(bottom: 1100);
+    await t.pump();
+    await t.pump();
+    expect(identical(t.state(find.byType(TerminalView)), before), isTrue);
+    expect(t.testTextInput.hasAnyClients, isTrue);
+
+    // Type a command with the soft keyboard and press Enter (Android sends "newline").
+    t.testTextInput.enterText('echo typed-ok > typed.txt');
+    await t.pump();
+    await t.testTextInput.receiveAction(TextInputAction.newline);
+    var created = false;
+    for (var i = 0; i < 60 && !created; i++) {
+      await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 150)));
+      await t.pump();
+      created = (await t.runAsync(() => api.exists('$root/typed.txt')))!;
+    }
+    expect(created, isTrue, reason: 'command typed in the terminal was not executed');
+    final content = (await t.runAsync(() => api.read('$root/typed.txt')))!;
+    expect(content.trim(), 'typed-ok');
+
+    await t.pumpWidget(const SizedBox());
+    await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 300)));
+  });
+
+  test('git: status, stage, commit, diff, log, branches', () async {
+    final api = Api(token, port: port);
+    final root = '${home.path}/projects/gitdemo';
+    await api.mkdir(root);
+    await api.exec('git init -q -b main && git config user.email t@example.com && git config user.name Tester', cwd: root);
+    await api.write('$root/a.txt', 'one\n');
+    await api.write('$root/dir/b.py', 'print(1)\n');
+
+    final g = GitController(api, root);
+    await g.refresh();
+    expect(g.isRepo, isTrue);
+    expect(g.status.branch, 'main');
+    expect(g.status.hasCommits, isFalse);
+    expect(g.status.changes.map((c) => c.path).toSet(), {'a.txt', 'dir/b.py'});
+    expect(g.colorFor('$root/dir', true), isNotNull);
+
+    await g.stage(g.status.changes.firstWhere((c) => c.path == 'a.txt'));
+    await g.refresh();
+    expect(g.status.staged.single.path, 'a.txt');
+    await g.unstageAll(); // before the first commit this uses `git rm --cached`
+    await g.refresh();
+    expect(g.status.staged, isEmpty);
+
+    await g.stageAll();
+    await g.commit('Первый коммит "с кавычками"', home.path);
+    await g.refresh();
+    expect(g.status.hasCommits, isTrue);
+    expect(g.count, 0);
+
+    await api.write('$root/a.txt', 'one\ntwo\n');
+    await g.refresh();
+    final ch = g.status.changes.single;
+    expect(ch.kind, GitKind.modified);
+    expect(await g.diff(ch), contains('+two'));
+    await g.stage(ch);
+    await g.refresh();
+    await g.unstage(g.status.staged.single);
+    await g.refresh();
+    await g.discard(g.status.changes.single);
+    await g.refresh();
+    expect(g.count, 0);
+
+    final log = await g.log();
+    expect(log.single.subject, 'Первый коммит "с кавычками"');
+    await g.createBranch('feature/x');
+    await g.refresh();
+    expect(g.status.branch, 'feature/x');
+    expect(await g.branches(), containsAll(['main', 'feature/x']));
+    await g.checkout('main');
+    await g.refresh();
+    expect(g.status.branch, 'main');
+  });
+
+  testWidgets('git panel renders changes in the drawer', (t) async {
+    phone(t);
+    mockNative();
+    final api = Api(token, port: port);
+    final root = '${home.path}/projects/gitdemo';
+    await t.runAsync(() => api.write('$root/new_file.dart', 'void main() {}\n'));
+    final st = (await t.runAsync(() => Settings.load(home.path)))!;
+    final tools = (await t.runAsync(() => api.info()))!.tools;
+    await t.pumpWidget(MaterialApp(
+      theme: ThemeData.dark(),
+      home: IdePage(api: api, settings: st, root: root, tools: tools, onClose: () {}),
+    ));
+    await settle(t, () => find.textContaining(' main*').evaluate().isNotEmpty);
+    expect(find.textContaining(' main*'), findsOneWidget); // branch + dirty marker in the run bar
+
+    await t.tap(find.byTooltip('Open navigation menu'));
+    await settle(t, () => find.text('Git').evaluate().isNotEmpty, tries: 20);
+    await t.tap(find.text('Git'));
+    await settle(t, () => find.text('new_file.dart').evaluate().isNotEmpty);
+    expect(find.text('Коммит'), findsOneWidget);
+    expect(find.textContaining('ИЗМЕНЕНИЯ'), findsOneWidget);
+
+    await t.pumpWidget(const SizedBox());
+    await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 200)));
   });
 
   testWidgets('IDE: detects project, runs file in a real PTY', (t) async {

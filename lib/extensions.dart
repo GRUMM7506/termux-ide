@@ -175,7 +175,7 @@ class _ExtensionsPageState extends State<ExtensionsPage> {
       ),
       body: t == null
           ? Center(child: error != null ? Text(error!) : const CircularProgressIndicator())
-          : ListView(padding: const EdgeInsets.all(12), children: [
+          : SafeArea(top: false, child: ListView(padding: const EdgeInsets.all(12), children: [
               const Padding(
                 padding: EdgeInsets.fromLTRB(4, 0, 4, 12),
                 child: Text(
@@ -184,7 +184,7 @@ class _ExtensionsPageState extends State<ExtensionsPage> {
                 ),
               ),
               for (final p in langPacks) _card(p, t.contains(p.tool)),
-            ]),
+            ])),
     );
   }
 

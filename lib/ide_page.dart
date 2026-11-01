@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -7,6 +8,8 @@ import 'dialogs.dart';
 import 'editor.dart';
 import 'extensions.dart';
 import 'file_tree.dart';
+import 'git.dart';
+import 'git_panel.dart';
 import 'native.dart';
 import 'runner.dart';
 import 'settings.dart';
@@ -72,6 +75,9 @@ class _IdePageState extends State<IdePage> {
 
   ProjectInfo? _project;
   late List<String> _tools = widget.tools;
+  late final GitController _git = GitController(widget.api, widget.root);
+  int _side = 0; // 0 = files, 1 = git
+  String _home = '/data/data/com.termux/files/home';
 
   Api get api => widget.api;
   Settings get st => widget.settings;
@@ -86,6 +92,10 @@ class _IdePageState extends State<IdePage> {
     FocusManager.instance.addListener(_onFocus);
     _hub.addListener(_onHub);
     Future.microtask(_detect);
+    Future.microtask(_git.refresh);
+    api.info().then((i) {
+      _home = i.home;
+    }).catchError((_) {});
   }
 
   @override
@@ -94,6 +104,7 @@ class _IdePageState extends State<IdePage> {
     _hub.removeListener(_onHub);
     _hub.closeAll();
     _hub.dispose();
+    _git.dispose();
     for (final f in _files) {
       f.disposeLater();
     }
@@ -106,8 +117,9 @@ class _IdePageState extends State<IdePage> {
 
   void _onFocus() {
     final pf = FocusManager.instance.primaryFocus;
-    final term = _hub.tabs.any((t) => t.focus == pf);
-    final ed = _cur != null && _cur!.focus == pf;
+    bool inside(FocusNode n) => pf != null && (pf == n || pf.ancestors.contains(n));
+    final term = _hub.tabs.any((t) => inside(t.focus));
+    final ed = _cur != null && inside(_cur!.focus);
     if (term != _termFocused || ed != _editorFocused) {
       setState(() {
         _termFocused = term;
@@ -191,6 +203,7 @@ class _IdePageState extends State<IdePage> {
       await api.write(f.path, text);
       f.saved = text;
       if (mounted) setState(() {});
+      unawaited(_git.refresh());
       return true;
     } catch (e) {
       _snack('Не сохранилось: $e');
@@ -242,6 +255,7 @@ class _IdePageState extends State<IdePage> {
     try {
       await api.write(path, '');
       await _tree.currentState?.refresh();
+      unawaited(_git.refresh());
       await _open(path);
     } catch (e) {
       _snack('Ошибка: $e');
@@ -254,6 +268,7 @@ class _IdePageState extends State<IdePage> {
     try {
       await api.mkdir('$dir/${name.trim()}');
       await _tree.currentState?.refresh();
+      unawaited(_git.refresh());
     } catch (e) {
       _snack('Ошибка: $e');
     }
@@ -300,12 +315,14 @@ class _IdePageState extends State<IdePage> {
             }
           });
           await _tree.currentState?.refresh();
+      unawaited(_git.refresh());
         case 'delete':
           final ok = await askChoice(context, 'Удалить ${e.name}${e.dir ? ' со всем содержимым' : ''}?', ['Удалить', 'Отмена']);
           if (ok != 0) return;
           await api.delete(e.path);
           _forget((f) => f.path == e.path || f.path.startsWith('${e.path}/'));
           await _tree.currentState?.refresh();
+      unawaited(_git.refresh());
       }
     } catch (err) {
       _snack('Ошибка: $err');
@@ -364,6 +381,7 @@ class _IdePageState extends State<IdePage> {
       unawaited(tab.exitCode.addListenerOnce(() {
         if (!mounted) return;
         _tree.currentState?.refresh();
+        _git.refresh();
         if (tab.exitCode.value == 0 && (target.id.contains('apk') || target.id == 'gradle_debug')) {
           _snack('APK собран', action: SnackBarAction(label: 'Установить', onPressed: _installApk));
         }
@@ -493,6 +511,40 @@ class _IdePageState extends State<IdePage> {
     }
   }
 
+  /// Runs a command in a new terminal tab (used by Git: push/pull…). Returns the exit code.
+  Future<int> _runInPanel(String cmd, String title) async {
+    try {
+      final tab = await TermTab.start(api, cwd: _git.repoRoot ?? widget.root, cmd: cmd, title: title);
+      if (!mounted) {
+        tab.dispose();
+        return -1;
+      }
+      _hub.add(tab);
+      setState(() => _panelOpen = true);
+      if (_scaffold.currentState?.isDrawerOpen ?? false) _scaffold.currentState!.closeDrawer();
+      return await tab.session.exitCode;
+    } catch (e) {
+      _snack('Не удалось запустить: $e');
+      return -1;
+    }
+  }
+
+  Future<void> _installGit() async {
+    final pack = langPacks.firstWhere((p) => p.id == 'git');
+    await runInTerminalPage(context, api, cmd: pack.install!, cwd: widget.root, title: 'Установка: Git');
+    await _refreshTools();
+    await _git.refresh();
+  }
+
+  Future<void> _openAbs(String path) async {
+    if (_scaffold.currentState?.isDrawerOpen ?? false) _scaffold.currentState!.closeDrawer();
+    try {
+      await _open(path);
+    } catch (e) {
+      _snack('Ошибка открытия: $e');
+    }
+  }
+
   Future<void> _installApk() async {
     const candidates = [
       'build/app/outputs/flutter-apk/app-release.apk',
@@ -594,11 +646,74 @@ class _IdePageState extends State<IdePage> {
 
   // ------------------------------------------------------------------ UI
 
+  Widget _sidePanel(Widget tree) {
+    Widget tab(int i, IconData icon, String label, {int badge = 0}) {
+      final on = _side == i;
+      return Expanded(
+        child: InkWell(
+          onTap: () {
+            setState(() => _side = i);
+            if (i == 1) _git.refresh();
+          },
+          child: Container(
+            height: 40,
+            decoration: BoxDecoration(
+              border: Border(bottom: BorderSide(color: on ? Colors.lightBlueAccent : Colors.transparent, width: 2)),
+            ),
+            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              Icon(icon, size: 17, color: on ? Colors.white : Colors.white54),
+              const SizedBox(width: 6),
+              Text(label, style: TextStyle(fontSize: 13, color: on ? Colors.white : Colors.white60)),
+              if (badge > 0) ...[
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                  decoration: BoxDecoration(color: const Color(0xFF0E639C), borderRadius: BorderRadius.circular(10)),
+                  child: Text('$badge', style: const TextStyle(fontSize: 11, color: Colors.white)),
+                ),
+              ],
+            ]),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      color: const Color(0xFF1B1B1C),
+      child: Column(children: [
+        ListenableBuilder(
+          listenable: _git,
+          builder: (_, __) => Container(
+            color: const Color(0xFF202021),
+            child: Row(children: [
+              tab(0, Icons.folder_copy_outlined, 'Файлы'),
+              tab(1, Icons.account_tree_outlined, 'Git', badge: _git.count),
+            ]),
+          ),
+        ),
+        Expanded(
+          child: IndexedStack(index: _side, children: [
+            tree,
+            GitPanel(
+              git: _git,
+              home: _home,
+              onOpenFile: _openAbs,
+              onRunInTerminal: _runInPanel,
+              onInstallGit: _installGit,
+            ),
+          ]),
+        ),
+      ]),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final size = MediaQuery.sizeOf(context);
-    final wide = size.width >= 840;
+    // Tablet / big window: file tree on the left. Phone (also in landscape): drawer.
+    final wide = size.width >= 840 && size.height >= 500;
     final keyboard = MediaQuery.viewInsetsOf(context).bottom > 0;
+    final compactBar = keyboard && size.height < 500;
     final res = _resolved;
     final runTab = _runTab;
     final termFull = _panelOpen && (_panelMax || (keyboard && _termFocused && !wide));
@@ -612,6 +727,8 @@ class _IdePageState extends State<IdePage> {
       onMenu: _entryMenu,
       onNewFile: _newFile,
       onNewFolder: _newFolder,
+      colorFor: _git.colorFor,
+      decorations: _git,
     );
 
     final panel = TerminalPanel(
@@ -626,39 +743,54 @@ class _IdePageState extends State<IdePage> {
       onToggleMax: () => setState(() => _panelMax = !_panelMax),
     );
 
-    final main = Column(children: [
-      if (!termFull) ...[
-        if (_files.isNotEmpty) _tabs(),
-        Expanded(
-          child: _cur == null
-              ? _empty(wide)
-              : CodeEditor(
-                  key: ValueKey(_cur!.path),
-                  controller: _cur!.ctrl,
-                  undo: _cur!.undo,
-                  focusNode: _cur!.focus,
-                  fontSize: st.fontSize,
-                  onSave: _saveCurrent,
+    final editorArea = Column(children: [
+      if (_files.isNotEmpty) _tabs(),
+      Expanded(
+        child: _cur == null
+            ? _empty(wide)
+            : CodeEditor(
+                key: ValueKey(_cur!.path),
+                controller: _cur!.ctrl,
+                undo: _cur!.undo,
+                focusNode: _cur!.focus,
+                fontSize: st.fontSize,
+                onSave: _saveCurrent,
+              ),
+      ),
+      if (_cur != null && _editorFocused && (keyboard || !wide))
+        ExtraKeysBar(controller: _cur!.ctrl, undo: _cur!.undo, onSave: _saveCurrent),
+    ]);
+
+    // The widget tree here never changes shape when the keyboard opens/closes (only sizes do).
+    // Re-creating the terminal would drop its keyboard connection, and the keyboard would close.
+    final main = LayoutBuilder(builder: (context, box) {
+      final maxH = box.maxHeight;
+      final handleH = _panelOpen && !termFull ? 12.0 : 0.0;
+      final panelH = !_panelOpen
+          ? 0.0
+          : termFull
+              ? maxH
+              : _panelH.clamp(math.min(120.0, maxH), math.max(120.0, maxH - handleH - 90));
+      return Column(children: [
+        Expanded(child: Offstage(offstage: termFull, child: editorArea)),
+        SizedBox(
+          height: handleH,
+          child: handleH == 0
+              ? null
+              : GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onVerticalDragUpdate: (d) =>
+                      setState(() => _panelH = (_panelH - d.delta.dy).clamp(120.0, math.max(120.0, maxH - 90))),
+                  child: Container(
+                    color: const Color(0xFF2D2D2D),
+                    alignment: Alignment.center,
+                    child: Container(width: 44, height: 3, color: Colors.white24),
+                  ),
                 ),
         ),
-        if (_cur != null && _editorFocused && (keyboard || !wide))
-          ExtraKeysBar(controller: _cur!.ctrl, undo: _cur!.undo, onSave: _saveCurrent),
-      ],
-      if (_panelOpen && !termFull)
-        GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onVerticalDragUpdate: (d) =>
-              setState(() => _panelH = (_panelH - d.delta.dy).clamp(120.0, size.height * .8)),
-          child: Container(
-            height: 12,
-            color: const Color(0xFF2D2D2D),
-            alignment: Alignment.center,
-            child: Container(width: 44, height: 3, color: Colors.white24),
-          ),
-        ),
-      if (_panelOpen)
-        if (termFull) Expanded(child: panel) else SizedBox(height: _panelH, child: panel),
-    ]);
+        SizedBox(height: panelH, child: _panelOpen ? panel : null),
+      ]);
+    });
 
     return PopScope(
       canPop: false,
@@ -680,7 +812,7 @@ class _IdePageState extends State<IdePage> {
         drawer: wide
             ? null
             : Drawer(
-                width: 300,
+                width: math.min(340.0, size.width * .85),
                 child: SafeArea(
                   child: Column(children: [
                     ListTile(
@@ -692,12 +824,12 @@ class _IdePageState extends State<IdePage> {
                         _tryClose();
                       },
                     ),
-                    Expanded(child: tree),
+                    Expanded(child: _sidePanel(tree)),
                   ]),
                 ),
               ),
         appBar: AppBar(
-          toolbarHeight: 48,
+          toolbarHeight: compactBar ? 44 : 48,
           backgroundColor: const Color(0xFF2D2D2D),
           titleSpacing: 0,
           leading: wide ? IconButton(tooltip: 'К проектам', onPressed: _tryClose, icon: const Icon(Icons.arrow_back)) : null,
@@ -724,7 +856,7 @@ class _IdePageState extends State<IdePage> {
             ),
             PopupMenuButton<String>(onSelected: _menu, itemBuilder: (_) => _menuItems()),
           ],
-          bottom: PreferredSize(
+          bottom: compactBar ? null : PreferredSize(
             preferredSize: const Size.fromHeight(34),
             child: InkWell(
               onTap: _pickTarget,
@@ -760,19 +892,36 @@ class _IdePageState extends State<IdePage> {
                     )
                   else
                     const Spacer(),
+                  ListenableBuilder(
+                    listenable: _git,
+                    builder: (_, __) => _git.isRepo
+                        ? Padding(
+                            padding: const EdgeInsets.only(left: 8),
+                            child: Row(mainAxisSize: MainAxisSize.min, children: [
+                              const Icon(Icons.call_split, size: 14, color: Colors.white54),
+                              Text(' ${_git.status.branch}${_git.count > 0 ? '*' : ''}',
+                                  style: const TextStyle(fontSize: 12, color: Colors.white60)),
+                            ]),
+                          )
+                        : const SizedBox(),
+                  ),
                   const Icon(Icons.arrow_drop_down, color: Colors.white54),
                 ]),
               ),
             ),
           ),
         ),
-        body: wide
-            ? Row(children: [
-                SizedBox(width: 270, child: tree),
-                const VerticalDivider(width: 1, color: Color(0xFF333333)),
-                Expanded(child: main),
-              ])
-            : main,
+        // Keep content above the system navigation bar and away from cutouts (edge-to-edge).
+        body: SafeArea(
+          top: false,
+          child: wide
+              ? Row(children: [
+                  SizedBox(width: 290, child: _sidePanel(tree)),
+                  const VerticalDivider(width: 1, color: Color(0xFF333333)),
+                  Expanded(child: main),
+                ])
+              : main,
+        ),
       ),
     );
   }
