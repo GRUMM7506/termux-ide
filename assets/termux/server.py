@@ -25,7 +25,7 @@ import termios
 import time
 import urllib.parse
 
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 HOME = os.environ.get("HOME", "/data/data/com.termux/files/home")
 DIR = os.path.join(HOME, ".termux-ide")
 PORT = 8765
@@ -476,15 +476,41 @@ async def handle(reader, writer):
             pass
 
 
+def _is_old_server(argv):
+    """Any previous IDE server: the legacy Dart one or another copy of this script."""
+    if any(a.endswith("ide_server.dart") for a in argv):
+        return True
+    return bool(argv) and "python" in os.path.basename(argv[0]) and any(
+        a.endswith("/.termux-ide/server.py") for a in argv[1:])
+
+
 def kill_previous():
-    pidfile = os.path.join(DIR, "server.pid")
+    """Stops older servers (pid file + /proc scan) so the port is free."""
+    me = os.getpid()
+    victims = set()
     try:
-        old = int(open(pidfile).read().strip())
-        if old != os.getpid():
-            os.kill(old, signal.SIGTERM)
-            time.sleep(0.5)
+        victims.add(int(open(os.path.join(DIR, "server.pid")).read().strip()))
     except (OSError, ValueError):
         pass
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/cmdline", "rb") as f:
+                argv = [a.decode(errors="replace") for a in f.read().split(b"\0") if a]
+        except OSError:
+            continue
+        if _is_old_server(argv):
+            victims.add(int(name))
+    victims.discard(me)
+    for pid in victims:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            log(f"stopped old server pid={pid}")
+        except OSError:
+            pass
+    if victims:
+        time.sleep(0.7)
 
 
 async def main():
@@ -505,7 +531,17 @@ async def main():
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         loop.add_signal_handler(sig, lambda: stop.done() or stop.set_result(None))
 
-    server = await asyncio.start_server(handle, "127.0.0.1", PORT, reuse_address=True, limit=1 << 20)
+    server = None
+    for attempt in range(6):
+        try:
+            server = await asyncio.start_server(handle, "127.0.0.1", PORT, reuse_address=True, limit=1 << 20)
+            break
+        except OSError as e:
+            if e.errno != 98 or attempt == 5:
+                raise
+            log(f"port {PORT} is busy, retrying ({attempt + 1})")
+            kill_previous()
+            await asyncio.sleep(1)
     log(f"Termux IDE server {VERSION} on 127.0.0.1:{PORT}, home={HOME}")
     asyncio.ensure_future(gc_sessions())
     await stop
