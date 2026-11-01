@@ -204,6 +204,30 @@ void main() {
     expect(g.status.branch, 'main');
   });
 
+  testWidgets('git tab switch on a tablet layout', (t) async {
+    t.view.physicalSize = const Size(2560, 1600);
+    t.view.devicePixelRatio = 2.0;
+    addTearDown(t.view.reset);
+    mockNative();
+    final api = Api(token, port: port);
+    final root = '${home.path}/projects/gitdemo';
+    final st = (await t.runAsync(() => Settings.load(home.path)))!;
+    final tools = (await t.runAsync(() => api.info()))!.tools;
+    await t.pumpWidget(MaterialApp(
+      theme: ThemeData.dark(),
+      home: IdePage(api: api, settings: st, root: root, tools: tools, onClose: () {}),
+    ));
+    await settle(t, () => find.text('new_file.dart').evaluate().isNotEmpty); // file tree loaded
+    await t.tap(find.text('Git'));
+    await t.pump();
+    debugPrint('TABLET: GitPanel onstage=${find.byType(GitPanel).evaluate().length}');
+    await settle(t, () => find.text('Коммит').evaluate().isNotEmpty);
+    expect(find.text('Коммит'), findsOneWidget);
+    expect(find.text('new_file.dart'), findsWidgets);
+    await t.pumpWidget(const SizedBox());
+    await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 200)));
+  });
+
   testWidgets('git panel renders changes in the drawer', (t) async {
     phone(t);
     mockNative();
@@ -227,7 +251,10 @@ void main() {
           'git@${find.text('Git').evaluate().isEmpty ? '-' : t.getCenter(find.text('Git'))}');
     }
     expect(scaffold.isDrawerOpen, isTrue, reason: 'drawer should stay open');
+    debugPrint('BEFORE TAP: tree items=${find.text('a.txt', skipOffstage: false).evaluate().length}');
     await t.tap(find.text('Git'));
+    await t.pump();
+    debugPrint('AFTER TAP: GitPanel onstage=${find.byType(GitPanel).evaluate().length}');
     await settle(t, () => find.text('new_file.dart').evaluate().isNotEmpty);
     final texts = find.descendant(of: find.byType(GitPanel), matching: find.byType(Text), skipOffstage: false)
         .evaluate()
