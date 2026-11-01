@@ -9,6 +9,7 @@ import 'package:xterm/xterm.dart';
 import 'package:termux_ide/api.dart';
 import 'package:termux_ide/extensions.dart';
 import 'package:termux_ide/git.dart';
+import 'package:termux_ide/git_panel.dart';
 import 'package:termux_ide/ide_page.dart';
 import 'package:termux_ide/main.dart';
 import 'package:termux_ide/projects_page.dart';
@@ -228,6 +229,11 @@ void main() {
     expect(scaffold.isDrawerOpen, isTrue, reason: 'drawer should stay open');
     await t.tap(find.text('Git'));
     await settle(t, () => find.text('new_file.dart').evaluate().isNotEmpty);
+    final texts = find.descendant(of: find.byType(GitPanel), matching: find.byType(Text), skipOffstage: false)
+        .evaluate()
+        .map((e) => (e.widget as Text).data ?? (e.widget as Text).textSpan?.toPlainText())
+        .toList();
+    debugPrint('GIT PANEL TEXTS: $texts');
     expect(find.text('Коммит'), findsOneWidget);
     expect(find.textContaining('ИЗМЕНЕНИЯ'), findsOneWidget);
 
