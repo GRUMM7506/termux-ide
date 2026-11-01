@@ -766,11 +766,11 @@ class _IdePageState extends State<IdePage> {
     final main = LayoutBuilder(builder: (context, box) {
       final maxH = box.maxHeight;
       final handleH = _panelOpen && !termFull ? 12.0 : 0.0;
-      final panelH = !_panelOpen
+      final double panelH = !_panelOpen
           ? 0.0
           : termFull
               ? maxH
-              : _panelH.clamp(math.min(120.0, maxH), math.max(120.0, maxH - handleH - 90));
+              : _panelH.clamp(math.min(120.0, maxH), math.max(120.0, maxH - handleH - 90)).toDouble();
       return Column(children: [
         Expanded(child: Offstage(offstage: termFull, child: editorArea)),
         SizedBox(
@@ -780,7 +780,7 @@ class _IdePageState extends State<IdePage> {
               : GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onVerticalDragUpdate: (d) =>
-                      setState(() => _panelH = (_panelH - d.delta.dy).clamp(120.0, math.max(120.0, maxH - 90))),
+                      setState(() => _panelH = (_panelH - d.delta.dy).clamp(120.0, math.max(120.0, maxH - 90)).toDouble()),
                   child: Container(
                     color: const Color(0xFF2D2D2D),
                     alignment: Alignment.center,
