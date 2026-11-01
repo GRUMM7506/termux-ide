@@ -68,7 +68,7 @@ bash tool/build_in_termux.sh
 
 Скрипт подставляет ARM-`aapt2` для Gradle и, если в сборке Flutter нет release-артефактов, собирает debug-версию.
 
-Релизы собирает GitHub Actions (`.github/workflows/build.yml`) при пуше тега `v*`. Для подписи нужны секреты `TIDE_KEYSTORE_BASE64` и `TIDE_KEYSTORE_PASSWORD`, без них APK подписывается debug-ключом.
+Релизы публикует GitHub Actions (`.github/workflows/build.yml`): достаточно поднять `version` в `pubspec.yaml` и запушить в `main`, после чего CI соберёт APK, поставит тег и создаст релиз. Для подписи нужны секреты `TIDE_KEYSTORE_BASE64` и `TIDE_KEYSTORE_PASSWORD`, без них APK подписывается debug-ключом.
 
 ## Структура
 
