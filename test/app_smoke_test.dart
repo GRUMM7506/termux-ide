@@ -219,7 +219,7 @@ void main() {
     expect(find.textContaining(' main*'), findsOneWidget); // branch + dirty marker in the run bar
 
     await t.tap(find.byTooltip('Open navigation menu'));
-    await settle(t, () => find.text('Git').evaluate().isNotEmpty, tries: 20);
+    await t.pump(const Duration(seconds: 1)); // drawer animation
     await t.tap(find.text('Git'));
     await settle(t, () => find.text('new_file.dart').evaluate().isNotEmpty);
     expect(find.text('Коммит'), findsOneWidget);
