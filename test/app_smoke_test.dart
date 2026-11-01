@@ -234,6 +234,9 @@ void main() {
         .map((e) => (e.widget as Text).data ?? (e.widget as Text).textSpan?.toPlainText())
         .toList();
     debugPrint('GIT PANEL TEXTS: $texts');
+    debugPrint('DRAWER OPEN: ${scaffold.isDrawerOpen}; GitPanel any=${find.byType(GitPanel, skipOffstage: false).evaluate().length} '
+        'onstage=${find.byType(GitPanel).evaluate().length}');
+    debugPrint('DRAWER TEXTS: ${find.descendant(of: find.byType(Drawer), matching: find.byType(Text), skipOffstage: false).evaluate().map((e) => (e.widget as Text).data ?? (e.widget as Text).textSpan?.toPlainText()).toList()}');
     expect(find.text('Коммит'), findsOneWidget);
     expect(find.textContaining('ИЗМЕНЕНИЯ'), findsOneWidget);
 
