@@ -28,6 +28,13 @@ Future<void> settle(WidgetTester t, bool Function() done, {int tries = 80}) asyn
   }
 }
 
+/// Finds text (incl. Text.rich) inside widgets of type [T].
+Finder textIn<T extends Widget>(String text) => find.descendant(
+      of: find.byType(T),
+      matching: find.byWidgetPredicate(
+          (w) => w is Text && (w.data ?? w.textSpan?.toPlainText() ?? '').contains(text)),
+    );
+
 void phone(WidgetTester t) {
   t.view.physicalSize = const Size(1080, 2340);
   t.view.devicePixelRatio = 2.625;
@@ -220,10 +227,10 @@ void main() {
     await settle(t, () => find.text('new_file.dart').evaluate().isNotEmpty); // file tree loaded
     await t.tap(find.text('Git'));
     await t.pump();
-    debugPrint('TABLET: GitPanel onstage=${find.byType(GitPanel).evaluate().length}');
-    await settle(t, () => find.text('Коммит').evaluate().isNotEmpty);
+    await settle(t, () => textIn<GitPanel>('new_file.dart').evaluate().isNotEmpty);
     expect(find.text('Коммит'), findsOneWidget);
-    expect(find.text('new_file.dart'), findsWidgets);
+    expect(textIn<GitPanel>('new_file.dart'), findsOneWidget);
+    expect(textIn<GitPanel>('ИЗМЕНЕНИЯ'), findsOneWidget);
     await t.pumpWidget(const SizedBox());
     await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 200)));
   });
@@ -246,26 +253,15 @@ void main() {
     final scaffold = t.state<ScaffoldState>(find.byType(Scaffold).first);
     await t.tap(find.byTooltip('Open navigation menu'));
     for (var i = 0; i < 10; i++) {
-      await t.pump(const Duration(milliseconds: 100));
-      debugPrint('drawer step $i open=${scaffold.isDrawerOpen} '
-          'git@${find.text('Git').evaluate().isEmpty ? '-' : t.getCenter(find.text('Git'))}');
+      await t.pump(const Duration(milliseconds: 100)); // drawer animation
     }
     expect(scaffold.isDrawerOpen, isTrue, reason: 'drawer should stay open');
-    debugPrint('BEFORE TAP: tree items=${find.text('a.txt', skipOffstage: false).evaluate().length}');
     await t.tap(find.text('Git'));
     await t.pump();
-    debugPrint('AFTER TAP: GitPanel onstage=${find.byType(GitPanel).evaluate().length}');
-    await settle(t, () => find.text('new_file.dart').evaluate().isNotEmpty);
-    final texts = find.descendant(of: find.byType(GitPanel), matching: find.byType(Text), skipOffstage: false)
-        .evaluate()
-        .map((e) => (e.widget as Text).data ?? (e.widget as Text).textSpan?.toPlainText())
-        .toList();
-    debugPrint('GIT PANEL TEXTS: $texts');
-    debugPrint('DRAWER OPEN: ${scaffold.isDrawerOpen}; GitPanel any=${find.byType(GitPanel, skipOffstage: false).evaluate().length} '
-        'onstage=${find.byType(GitPanel).evaluate().length}');
-    debugPrint('DRAWER TEXTS: ${find.descendant(of: find.byType(Drawer), matching: find.byType(Text), skipOffstage: false).evaluate().map((e) => (e.widget as Text).data ?? (e.widget as Text).textSpan?.toPlainText()).toList()}');
+    await settle(t, () => textIn<GitPanel>('new_file.dart').evaluate().isNotEmpty);
+    expect(scaffold.isDrawerOpen, isTrue);
     expect(find.text('Коммит'), findsOneWidget);
-    expect(find.textContaining('ИЗМЕНЕНИЯ'), findsOneWidget);
+    expect(textIn<GitPanel>('new_file.dart'), findsOneWidget);
 
     await t.pumpWidget(const SizedBox());
     await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 200)));
