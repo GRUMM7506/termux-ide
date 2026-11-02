@@ -9,6 +9,9 @@ class FileTree extends StatefulWidget {
   final String? activePath;
   final void Function(String path) onOpen;
   final void Function(FsEntry entry) onMenu;
+
+  /// Right click (mouse): context menu at the pointer.
+  final void Function(FsEntry entry, Offset position)? onContextMenu;
   final void Function(String dir) onNewFile;
   final void Function(String dir) onNewFolder;
 
@@ -22,6 +25,7 @@ class FileTree extends StatefulWidget {
     required this.root,
     required this.onOpen,
     required this.onMenu,
+    this.onContextMenu,
     required this.onNewFile,
     required this.onNewFolder,
     this.activePath,
@@ -174,6 +178,9 @@ class FileTreeState extends State<FileTree> {
                 child: InkWell(
                   onTap: () => e.dir ? _toggle(e) : widget.onOpen(e.path),
                   onLongPress: () => widget.onMenu(e),
+                  onSecondaryTapUp: (d) => widget.onContextMenu != null
+                      ? widget.onContextMenu!(e, d.globalPosition)
+                      : widget.onMenu(e),
                   child: Padding(
                     padding: EdgeInsets.only(left: 8.0 + depth * 14, top: 6, bottom: 6, right: 8),
                     child: Row(children: [

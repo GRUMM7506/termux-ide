@@ -8,13 +8,23 @@ class Settings {
   String token = '';
   bool onboarded = false;
   double fontSize = 14;
+
+  /// Large screens (tablet, DeX): widths of the side panels, in logical pixels.
+  double sideWidth = 290;
+  double agentWidth = 440;
   List<String> recent = [];
 
   /// Run target per project: 'auto' (default), a target id, or 'custom'.
   Map<String, String> targetByProject = {};
   Map<String, String> customCmdByProject = {};
 
+  /// AI agent panel per project: agent, access mode, model, session ids.
+  Map<String, Map<String, String>> agentByProject = {};
+
   Settings._(this._file);
+
+  /// App files dir (agent chat history lives next to settings.json).
+  String get dir => _file.parent.path;
 
   static Future<Settings> load(String filesDir) async {
     final s = Settings._(File('$filesDir/settings.json'));
@@ -23,9 +33,13 @@ class Settings {
       s.token = (m['token'] as String?) ?? '';
       s.onboarded = m['onboarded'] == true;
       s.fontSize = (m['fontSize'] as num?)?.toDouble() ?? 14;
+      s.sideWidth = (m['sideWidth'] as num?)?.toDouble() ?? 290;
+      s.agentWidth = (m['agentWidth'] as num?)?.toDouble() ?? 440;
       s.recent = ((m['recent'] as List?) ?? []).cast<String>();
       s.targetByProject = ((m['target'] as Map?) ?? {}).cast<String, String>();
       s.customCmdByProject = ((m['customCmd'] as Map?) ?? {}).cast<String, String>();
+      s.agentByProject = ((m['agent'] as Map?) ?? {})
+          .map((k, v) => MapEntry(k as String, (v as Map).cast<String, String>()));
     } catch (_) {}
     if (s.token.length < 16) {
       final r = Random.secure();
@@ -45,8 +59,11 @@ class Settings {
         'token': token,
         'onboarded': onboarded,
         'fontSize': fontSize,
+        'sideWidth': sideWidth,
+        'agentWidth': agentWidth,
         'recent': recent,
         'target': targetByProject,
         'customCmd': customCmdByProject,
+        'agent': agentByProject,
       }));
 }

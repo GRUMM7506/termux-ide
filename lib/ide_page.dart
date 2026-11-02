@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import 'agent.dart';
 import 'api.dart';
 import 'dialogs.dart';
 import 'editor.dart';
@@ -76,7 +79,23 @@ class _IdePageState extends State<IdePage> {
   ProjectInfo? _project;
   late List<String> _tools = widget.tools;
   late final GitController _git = GitController(widget.api, widget.root);
-  int _side = 0; // 0 = files, 1 = git
+  int _side = 0; // 0 = files, 1 = git, 2 = agent
+
+  // Big screens (tablet, Samsung DeX, desktop mode).
+  bool _wide = false; // side panel on the left instead of a drawer
+  bool _xl = false; // room for a second column: the agent docks on the right
+  bool _sideOpen = true;
+  bool _agentDock = false;
+  double _sideWNow = 290;
+  final _keysFocus = FocusNode(debugLabel: 'ide-shortcuts', skipTraversal: true);
+  late final AgentController _agent = AgentController(
+    api: widget.api,
+    settings: widget.settings,
+    root: widget.root,
+    onFilesChanged: _onAgentChanged,
+    onBeforeSend: _saveAll,
+    currentFile: () => _cur?.path,
+  );
   String _home = '/data/data/com.termux/files/home';
 
   Api get api => widget.api;
@@ -105,6 +124,8 @@ class _IdePageState extends State<IdePage> {
     _hub.closeAll();
     _hub.dispose();
     _git.dispose();
+    _agent.dispose();
+    _keysFocus.dispose();
     for (final f in _files) {
       f.disposeLater();
     }
@@ -124,6 +145,16 @@ class _IdePageState extends State<IdePage> {
       setState(() {
         _termFocused = term;
         _editorFocused = ed;
+      });
+    }
+    // Nothing focused (e.g. a text field was unfocused): give focus back to the IDE so
+    // keyboard shortcuts keep working with a hardware keyboard.
+    if (pf == null || pf is FocusScopeNode) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final now = FocusManager.instance.primaryFocus;
+        if (mounted && !_closing && (now == null || now is FocusScopeNode) && (ModalRoute.of(context)?.isCurrent ?? false)) {
+          _keysFocus.requestFocus();
+        }
       });
     }
   }
@@ -274,24 +305,51 @@ class _IdePageState extends State<IdePage> {
     }
   }
 
-  Future<void> _entryMenu(FsEntry e) async {
+  /// File tree entry menu: bottom sheet (touch) or a popup at the pointer (right click).
+  Future<void> _entryMenu(FsEntry e, [Offset? at]) async {
     final dir = e.dir ? e.path : e.path.substring(0, e.path.lastIndexOf('/'));
-    final choice = await showModalBottomSheet<String>(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          ListTile(title: Text(e.name, style: const TextStyle(fontWeight: FontWeight.bold))),
-          ListTile(leading: const Icon(Icons.note_add_outlined), title: const Text('Новый файл здесь'), onTap: () => Navigator.pop(ctx, 'file')),
-          ListTile(leading: const Icon(Icons.create_new_folder_outlined), title: const Text('Новая папка здесь'), onTap: () => Navigator.pop(ctx, 'folder')),
-          ListTile(leading: const Icon(Icons.drive_file_rename_outline), title: const Text('Переименовать'), onTap: () => Navigator.pop(ctx, 'rename')),
-          ListTile(leading: const Icon(Icons.terminal), title: const Text('Терминал в этой папке'), onTap: () => Navigator.pop(ctx, 'shell')),
-          ListTile(
-              leading: const Icon(Icons.delete_outline, color: Colors.redAccent),
-              title: const Text('Удалить', style: TextStyle(color: Colors.redAccent)),
-              onTap: () => Navigator.pop(ctx, 'delete')),
-        ]),
-      ),
-    );
+    const opts = [
+      ('file', Icons.note_add_outlined, 'Новый файл здесь'),
+      ('folder', Icons.create_new_folder_outlined, 'Новая папка здесь'),
+      ('rename', Icons.drive_file_rename_outline, 'Переименовать'),
+      ('shell', Icons.terminal, 'Терминал в этой папке'),
+      ('delete', Icons.delete_outline, 'Удалить'),
+    ];
+    Color? col(String id) => id == 'delete' ? Colors.redAccent : null;
+    final String? choice;
+    if (at != null) {
+      choice = await showMenu<String>(
+        context: context,
+        position: RelativeRect.fromLTRB(at.dx, at.dy, at.dx, at.dy),
+        items: [
+          for (final (id, icon, title) in opts)
+            PopupMenuItem(
+              value: id,
+              height: 40,
+              child: Row(children: [
+                Icon(icon, size: 18, color: col(id)),
+                const SizedBox(width: 12),
+                Text(title, style: TextStyle(fontSize: 13.5, color: col(id))),
+              ]),
+            ),
+        ],
+      );
+    } else {
+      choice = await showModalBottomSheet<String>(
+        context: context,
+        builder: (ctx) => SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            ListTile(title: Text(e.name, style: const TextStyle(fontWeight: FontWeight.bold))),
+            for (final (id, icon, title) in opts)
+              ListTile(
+                leading: Icon(icon, color: col(id)),
+                title: Text(title, style: TextStyle(color: col(id))),
+                onTap: () => Navigator.pop(ctx, id),
+              ),
+          ]),
+        ),
+      );
+    }
     if (!mounted || choice == null) return;
     try {
       switch (choice) {
@@ -536,6 +594,232 @@ class _IdePageState extends State<IdePage> {
     await _git.refresh();
   }
 
+  // ------------------------------------------------------------------ agent
+
+  /// The agent changed files: refresh the tree, Git and open editors without unsaved edits.
+  Future<void> _onAgentChanged() async {
+    if (!mounted) return;
+    _tree.currentState?.refresh();
+    _git.refresh();
+    for (final f in List.of(_files)) {
+      if (f.dirty) continue;
+      try {
+        if (!await api.exists(f.path)) continue;
+        final r = await api.readFile(f.path);
+        if (!mounted || f.dirty || r.binary || r.content == f.saved || !_files.contains(f)) continue;
+        final off = f.ctrl.selection.baseOffset;
+        f.saved = r.content;
+        f.ctrl.value = TextEditingValue(
+          text: r.content,
+          selection: TextSelection.collapsed(offset: off < 0 ? 0 : math.min(off, r.content.length)),
+        );
+      } catch (_) {}
+    }
+    if (mounted) setState(() {});
+  }
+
+  bool get _agentDocked => _xl && (_agentDock || _side == 2);
+
+  /// Phone: drawer on the agent tab. Tablet: agent tab on the left. DeX / big window: right column.
+  void _openAgent() {
+    if (_xl) {
+      final dock = !_agentDocked;
+      setState(() {
+        _agentDock = dock;
+        if (_side == 2) _side = 0;
+      });
+      return;
+    }
+    _showSide(2);
+  }
+
+  /// Shows a side tab: 0 = files, 1 = git, 2 = agent.
+  void _showSide(int i) {
+    if (i == 2 && _xl) {
+      setState(() => _agentDock = true);
+      return;
+    }
+    setState(() {
+      _side = i;
+      _sideOpen = true;
+    });
+    if (i == 1) _git.refresh();
+    if (!_wide) _scaffold.currentState?.openDrawer();
+  }
+
+  void _toggleSidebar() {
+    if (_wide) {
+      setState(() => _sideOpen = !_sideOpen);
+    } else if (_scaffold.currentState?.isDrawerOpen ?? false) {
+      _scaffold.currentState!.closeDrawer();
+    } else {
+      _scaffold.currentState?.openDrawer();
+    }
+  }
+
+  void _toggleTerminal() {
+    if (_hub.tabs.isEmpty) {
+      _newShell();
+    } else {
+      setState(() => _panelOpen = !_panelOpen);
+    }
+  }
+
+  void _cycleTab(int d) {
+    if (_files.isEmpty) return;
+    setState(() => _active = (_active + d) % _files.length);
+  }
+
+  Future<void> _closeMany(List<OpenFile> list) async {
+    for (final f in list) {
+      final i = _files.indexOf(f);
+      if (i >= 0) await _closeTab(i);
+    }
+  }
+
+  Future<void> _tabMenu(int i, Offset at) async {
+    final f = _files[i];
+    final v = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(at.dx, at.dy, at.dx, at.dy),
+      items: const [
+        PopupMenuItem(value: 'close', height: 40, child: Text('Закрыть  (Ctrl+W)')),
+        PopupMenuItem(value: 'others', height: 40, child: Text('Закрыть другие')),
+        PopupMenuItem(value: 'all', height: 40, child: Text('Закрыть все')),
+        PopupMenuItem(value: 'save', height: 40, child: Text('Сохранить  (Ctrl+S)')),
+      ],
+    );
+    switch (v) {
+      case 'close':
+        await _closeMany([f]);
+      case 'others':
+        await _closeMany(_files.where((x) => x != f).toList());
+      case 'all':
+        await _closeMany(List.of(_files));
+      case 'save':
+        if (await _save(f)) _snack('Сохранено: ${f.name}');
+    }
+  }
+
+  /// Keyboard shortcuts (hardware keyboard: DeX, tablets with a keyboard, Chromebooks).
+  /// In the terminal only combos a shell does not need are taken ([terminal] = true).
+  KeyEventResult _onKey(FocusNode _, KeyEvent e, {bool terminal = false}) {
+    if (e is! KeyDownEvent && e is! KeyRepeatEvent) return KeyEventResult.ignored;
+    final hk = HardwareKeyboard.instance;
+    final ctrl = hk.isControlPressed || hk.isMetaPressed;
+    final shift = hk.isShiftPressed;
+    final k = e.logicalKey;
+    VoidCallback? action;
+    var inTerminal = false;
+    if (k == LogicalKeyboardKey.f5 && !ctrl) {
+      inTerminal = true;
+      action = shift ? () => _runTab?.stop() : () => _run();
+    } else if (ctrl && !hk.isAltPressed) {
+      if (k == LogicalKeyboardKey.backquote) {
+        inTerminal = true;
+        action = shift ? () => _newShell() : _toggleTerminal;
+      } else if (k == LogicalKeyboardKey.tab) {
+        inTerminal = true;
+        action = () => _cycleTab(shift ? -1 : 1);
+      } else if (shift) {
+        inTerminal = true;
+        action = switch (k) {
+          LogicalKeyboardKey.keyS => () => _saveAll().then((_) => _snack('Всё сохранено')),
+          LogicalKeyboardKey.keyE => () => _showSide(0),
+          LogicalKeyboardKey.keyG => () => _showSide(1),
+          LogicalKeyboardKey.keyA => _openAgent,
+          _ => null,
+        };
+      } else {
+        action = switch (k) {
+          LogicalKeyboardKey.keyS => () => _saveCurrent(),
+          LogicalKeyboardKey.keyW => () {
+              if (_active >= 0) _closeTab(_active);
+            },
+          LogicalKeyboardKey.keyB => _toggleSidebar,
+          LogicalKeyboardKey.keyN => () => _newFile(widget.root),
+          LogicalKeyboardKey.equal || LogicalKeyboardKey.numpadAdd => () => _menu('font+'),
+          LogicalKeyboardKey.minus || LogicalKeyboardKey.numpadSubtract => () => _menu('font-'),
+          _ => null,
+        };
+      }
+    }
+    if (action == null || (terminal && !inTerminal)) return KeyEventResult.ignored;
+    if (e is KeyRepeatEvent && k != LogicalKeyboardKey.tab) return KeyEventResult.handled;
+    action();
+    return KeyEventResult.handled;
+  }
+
+  void _showShortcuts() {
+    const keys = [
+      ('F5 / Shift+F5', 'Запуск / стоп'),
+      ('Ctrl+S / Ctrl+Shift+S', 'Сохранить / сохранить всё'),
+      ('Ctrl+N', 'Новый файл'),
+      ('Ctrl+W', 'Закрыть вкладку'),
+      ('Ctrl+Tab / Ctrl+Shift+Tab', 'Следующая / предыдущая вкладка'),
+      ('Ctrl+`', 'Показать / скрыть терминал'),
+      ('Ctrl+Shift+`', 'Новый терминал'),
+      ('Ctrl+B', 'Боковая панель'),
+      ('Ctrl+Shift+E / G / A', 'Файлы / Git / Агент'),
+      ('Ctrl+= / Ctrl+-', 'Шрифт крупнее / мельче'),
+      ('Ctrl+V / Ctrl+Shift+C', 'Вставить / копировать в терминале'),
+      ('Правый клик', 'Меню файла или вкладки'),
+      ('Средний клик', 'Закрыть вкладку'),
+    ];
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Горячие клавиши'),
+        content: SizedBox(
+          width: 460,
+          child: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              for (final (k, v) in keys)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(children: [
+                    SizedBox(
+                        width: 200,
+                        child: Text(k, style: const TextStyle(fontFamily: 'monospace', fontSize: 12.5, color: Colors.lightBlueAccent))),
+                    Expanded(child: Text(v, style: const TextStyle(fontSize: 13))),
+                  ]),
+                ),
+            ]),
+          ),
+        ),
+        actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK'))],
+      ),
+    );
+  }
+
+  Future<void> _agentRunPage(String cmd, String title) async {
+    await runInTerminalPage(context, api, cmd: cmd, cwd: widget.root, title: title);
+    await _refreshTools();
+  }
+
+  /// The agent's own terminal UI (claude / codex) in the terminal panel, maximized.
+  Future<void> _agentTerminal(String cmd, String title) async {
+    try {
+      final tab = await TermTab.start(api, cwd: widget.root, cmd: cmd, title: title);
+      if (!mounted) {
+        tab.dispose();
+        return;
+      }
+      _hub.add(tab);
+      setState(() {
+        _panelOpen = true;
+        _panelMax = true;
+      });
+      if (_scaffold.currentState?.isDrawerOpen ?? false) _scaffold.currentState!.closeDrawer();
+      tab.focus.requestFocus();
+      unawaited(tab.exitCode.addListenerOnce(() {
+        if (mounted) _onAgentChanged();
+      }));
+    } catch (e) {
+      _snack('Не удалось открыть терминал: $e');
+    }
+  }
+
   Future<void> _openAbs(String path) async {
     if (_scaffold.currentState?.isDrawerOpen ?? false) _scaffold.currentState!.closeDrawer();
     try {
@@ -596,6 +880,8 @@ class _IdePageState extends State<IdePage> {
         st.fontSize = (st.fontSize - 1).clamp(9.0, 28.0);
         await st.save();
         setState(() {});
+      case 'keys':
+        _showShortcuts();
       case 'close':
         await _tryClose();
     }
@@ -619,6 +905,7 @@ class _IdePageState extends State<IdePage> {
       const PopupMenuDivider(),
       const PopupMenuItem(value: 'font+', child: Text('Шрифт крупнее')),
       const PopupMenuItem(value: 'font-', child: Text('Шрифт мельче')),
+      const PopupMenuItem(value: 'keys', child: Text('Горячие клавиши')),
       const PopupMenuDivider(),
       const PopupMenuItem(value: 'close', child: Text('Закрыть проект')),
     ];
@@ -633,8 +920,8 @@ class _IdePageState extends State<IdePage> {
       if (r == null || r == 2) return;
       if (r == 0) await _saveAll();
     }
-    if (_hub.tabs.any((t) => t.running)) {
-      final r = await askChoice(context, 'Запущенные программы будут остановлены.', ['Закрыть проект', 'Отмена']);
+    if (_hub.tabs.any((t) => t.running) || _agent.busy) {
+      final r = await askChoice(context, 'Запущенные программы${_agent.busy ? ' и агент' : ''} будут остановлены.', ['Закрыть проект', 'Отмена']);
       if (r != 0) return;
     }
     _closing = true;
@@ -646,9 +933,10 @@ class _IdePageState extends State<IdePage> {
 
   // ------------------------------------------------------------------ UI
 
-  Widget _sidePanel(Widget tree) {
+  Widget _sidePanel(Widget tree, {bool agentTab = true}) {
+    final index = !agentTab && _side == 2 ? 0 : _side;
     Widget tab(int i, IconData icon, String label, {int badge = 0}) {
-      final on = _side == i;
+      final on = index == i;
       return Expanded(
         child: InkWell(
           onTap: () {
@@ -688,11 +976,12 @@ class _IdePageState extends State<IdePage> {
             child: Row(children: [
               tab(0, Icons.folder_copy_outlined, 'Файлы'),
               tab(1, Icons.account_tree_outlined, 'Git', badge: _git.count),
+              if (agentTab) tab(2, Icons.smart_toy_outlined, 'Агент'),
             ]),
           ),
         ),
         Expanded(
-          child: IndexedStack(index: _side, children: [
+          child: IndexedStack(index: index, children: [
             tree,
             GitPanel(
               git: _git,
@@ -701,6 +990,10 @@ class _IdePageState extends State<IdePage> {
               onRunInTerminal: _runInPanel,
               onInstallGit: _installGit,
             ),
+            // Built only while visible: opening a project must not start the agent CLI.
+            index == 2
+                ? AgentPanel(agent: _agent, onRunPage: _agentRunPage, onOpenTerminal: _agentTerminal)
+                : const SizedBox.shrink(),
           ]),
         ),
       ]),
@@ -712,6 +1005,10 @@ class _IdePageState extends State<IdePage> {
     final size = MediaQuery.sizeOf(context);
     // Tablet / big window: file tree on the left. Phone (also in landscape): drawer.
     final wide = size.width >= 840 && size.height >= 500;
+    // DeX / big window: files on the left, editor in the middle, agent on the right.
+    final xl = wide && size.width >= 1280 && size.height >= 600;
+    _wide = wide;
+    _xl = xl;
     final keyboard = MediaQuery.viewInsetsOf(context).bottom > 0;
     final compactBar = keyboard && size.height < 500;
     final res = _resolved;
@@ -725,6 +1022,7 @@ class _IdePageState extends State<IdePage> {
       activePath: _cur?.path,
       onOpen: _openFromTree,
       onMenu: _entryMenu,
+      onContextMenu: _entryMenu,
       onNewFile: _newFile,
       onNewFolder: _newFolder,
       colorFor: _git.colorFor,
@@ -741,6 +1039,9 @@ class _IdePageState extends State<IdePage> {
         _panelMax = false;
       }),
       onToggleMax: () => setState(() => _panelMax = !_panelMax),
+      // A hardware keyboard on a big screen does not need ESC/CTRL/arrows on screen.
+      showKeys: !wide || keyboard,
+      onKeyEvent: (n, e) => _onKey(n, e, terminal: true),
     );
 
     final editorArea = Column(children: [
@@ -806,13 +1107,17 @@ class _IdePageState extends State<IdePage> {
         }
         _tryClose();
       },
-      child: Scaffold(
+      child: Focus(
+       focusNode: _keysFocus,
+       autofocus: true,
+       onKeyEvent: _onKey,
+       child: Scaffold(
         key: _scaffold,
         backgroundColor: CodeTheme.bg,
         drawer: wide
             ? null
             : Drawer(
-                width: math.min(340.0, size.width * .85),
+                width: _side == 2 ? math.min(520.0, size.width * .94) : math.min(340.0, size.width * .85),
                 child: SafeArea(
                   child: Column(children: [
                     ListTile(
@@ -843,15 +1148,25 @@ class _IdePageState extends State<IdePage> {
               IconButton(tooltip: 'Стоп', onPressed: runTab!.stop, icon: const Icon(Icons.stop, color: Colors.redAccent))
             else
               IconButton(tooltip: 'Запуск', onPressed: _run, icon: const Icon(Icons.play_arrow, color: Colors.greenAccent)),
+            if (wide)
+              IconButton(
+                tooltip: 'Боковая панель (Ctrl+B)',
+                onPressed: _toggleSidebar,
+                icon: Icon(_sideOpen ? Icons.vertical_split : Icons.vertical_split_outlined,
+                    color: _sideOpen ? Colors.lightBlueAccent : null),
+              ),
+            ListenableBuilder(
+              listenable: _agent,
+              builder: (_, __) => IconButton(
+                tooltip: 'Агент',
+                onPressed: _openAgent,
+                icon: Icon(Icons.smart_toy_outlined,
+                    color: _agent.busy ? Colors.amber : (_agentDocked ? Colors.lightBlueAccent : null)),
+              ),
+            ),
             IconButton(
               tooltip: 'Терминал',
-              onPressed: () {
-                if (_hub.tabs.isEmpty) {
-                  _newShell();
-                } else {
-                  setState(() => _panelOpen = !_panelOpen);
-                }
-              },
+              onPressed: _toggleTerminal,
               icon: Icon(Icons.terminal, color: _panelOpen ? Colors.lightBlueAccent : null),
             ),
             PopupMenuButton<String>(onSelected: _menu, itemBuilder: (_) => _menuItems()),
@@ -914,16 +1229,44 @@ class _IdePageState extends State<IdePage> {
         // Keep content above the system navigation bar and away from cutouts (edge-to-edge).
         body: SafeArea(
           top: false,
-          child: wide
-              ? Row(children: [
-                  SizedBox(width: 290, child: _sidePanel(tree)),
-                  const VerticalDivider(width: 1, color: Color(0xFF333333)),
-                  Expanded(child: main),
-                ])
-              : main,
+          child: wide ? _wideBody(size, tree, main) : main,
         ),
+       ),
       ),
     );
+  }
+
+  /// Tablet / DeX layout: [files | git | agent] · editor + terminal · [agent on xl screens].
+  /// Both side columns are resized by dragging their edge (mouse or finger).
+  Widget _wideBody(Size size, Widget tree, Widget main) {
+    final maxSide = math.max(220.0, size.width * .4);
+    final sideW = (!_xl && _side == 2 ? math.max(st.sideWidth, 380.0) : st.sideWidth).clamp(200.0, maxSide).toDouble();
+    _sideWNow = sideW;
+    final maxAgent = math.max(320.0, size.width * .5);
+    final agentW = st.agentWidth.clamp(320.0, maxAgent).toDouble();
+    return Row(children: [
+      if (_sideOpen) ...[
+        SizedBox(width: sideW, child: _sidePanel(tree, agentTab: !_xl)),
+        _Resizer(
+          onDrag: (dx) => setState(() => st.sideWidth = (_sideWNow + dx).clamp(200.0, maxSide).toDouble()),
+          onEnd: () => st.save(),
+        ),
+      ],
+      Expanded(child: main),
+      if (_agentDocked) ...[
+        _Resizer(
+          onDrag: (dx) => setState(() => st.agentWidth = (st.agentWidth.clamp(320.0, maxAgent) - dx).clamp(320.0, maxAgent).toDouble()),
+          onEnd: () => st.save(),
+        ),
+        SizedBox(
+          width: agentW,
+          child: Container(
+            color: const Color(0xFF1B1B1C),
+            child: AgentPanel(agent: _agent, onRunPage: _agentRunPage, onOpenTerminal: _agentTerminal),
+          ),
+        ),
+      ],
+    ]);
   }
 
   Widget _tabs() {
@@ -938,8 +1281,14 @@ class _IdePageState extends State<IdePage> {
           final active = i == _active;
           return ListenableBuilder(
             listenable: f.ctrl,
-            builder: (_, __) => InkWell(
+            builder: (_, __) => Listener(
+             // Middle click closes the tab (mouse in DeX / desktop mode).
+             onPointerDown: (ev) {
+               if (ev.kind == PointerDeviceKind.mouse && ev.buttons == kMiddleMouseButton) _closeTab(i);
+             },
+             child: InkWell(
               onTap: () => setState(() => _active = i),
+              onSecondaryTapUp: (d) => _tabMenu(i, d.globalPosition),
               child: Container(
                 padding: const EdgeInsets.only(left: 12, right: 4),
                 decoration: BoxDecoration(
@@ -957,6 +1306,7 @@ class _IdePageState extends State<IdePage> {
                   ),
                 ]),
               ),
+             ),
             ),
           );
         },
@@ -997,5 +1347,30 @@ extension _Once on ValueNotifier<int?> {
 
     addListener(l);
     return c.future;
+  }
+}
+
+/// Draggable edge between columns (resize cursor for the mouse).
+class _Resizer extends StatelessWidget {
+  final ValueChanged<double> onDrag;
+  final VoidCallback onEnd;
+  const _Resizer({required this.onDrag, required this.onEnd});
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeColumn,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragUpdate: (d) => onDrag(d.delta.dx),
+        onHorizontalDragEnd: (_) => onEnd(),
+        child: Container(
+          width: 6,
+          color: const Color(0xFF1E1E1E),
+          alignment: Alignment.center,
+          child: Container(width: 1, color: const Color(0xFF333333)),
+        ),
+      ),
+    );
   }
 }
