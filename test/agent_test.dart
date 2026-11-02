@@ -56,7 +56,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0
 Future<void> settle(WidgetTester t, bool Function() done, {int tries = 100}) async {
   for (var i = 0; i < tries && !done(); i++) {
     await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
-    await t.pump();
+    await t.pump(const Duration(milliseconds: 50)); // lets the drawer animation finish
   }
 }
 
@@ -150,6 +150,7 @@ void main() {
       await settle(t, () => find.byTooltip('Агент').evaluate().isNotEmpty);
       await t.tap(find.byTooltip('Агент'));
       await settle(t, () => inAgent(find.byType(TextField)).evaluate().isNotEmpty);
+      await t.pump(const Duration(milliseconds: 600)); // drawer fully open
       expect(inAgent(find.byType(TextField)), findsOneWidget, reason: 'agent chat did not open');
     }
 
