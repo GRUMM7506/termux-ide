@@ -8,6 +8,10 @@ class Settings {
   String token = '';
   bool onboarded = false;
   double fontSize = 14;
+
+  /// Large screens (tablet, DeX): widths of the side panels, in logical pixels.
+  double sideWidth = 290;
+  double agentWidth = 440;
   List<String> recent = [];
 
   /// Run target per project: 'auto' (default), a target id, or 'custom'.
@@ -29,6 +33,8 @@ class Settings {
       s.token = (m['token'] as String?) ?? '';
       s.onboarded = m['onboarded'] == true;
       s.fontSize = (m['fontSize'] as num?)?.toDouble() ?? 14;
+      s.sideWidth = (m['sideWidth'] as num?)?.toDouble() ?? 290;
+      s.agentWidth = (m['agentWidth'] as num?)?.toDouble() ?? 440;
       s.recent = ((m['recent'] as List?) ?? []).cast<String>();
       s.targetByProject = ((m['target'] as Map?) ?? {}).cast<String, String>();
       s.customCmdByProject = ((m['customCmd'] as Map?) ?? {}).cast<String, String>();
@@ -53,6 +59,8 @@ class Settings {
         'token': token,
         'onboarded': onboarded,
         'fontSize': fontSize,
+        'sideWidth': sideWidth,
+        'agentWidth': agentWidth,
         'recent': recent,
         'target': targetByProject,
         'customCmd': customCmdByProject,

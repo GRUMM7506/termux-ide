@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:termux_ide/agent.dart';
 import 'package:termux_ide/api.dart';
+import 'package:termux_ide/file_tree.dart';
 import 'package:termux_ide/ide_page.dart';
 import 'package:termux_ide/settings.dart';
 import 'package:termux_ide/terminal_panel.dart';
@@ -172,6 +173,42 @@ void main() {
       expect(args, contains('--output-format stream-json'));
       expect(args, contains('--permission-mode auto'));
       expect(File('${home.path}/claude-input.txt').readAsStringSync(), contains('Создай файл'));
+      await closeIde(t);
+    });
+
+    testWidgets('DeX / big window: agent docks on the right, shortcuts work', (t) async {
+      t.view.physicalSize = const Size(1920, 1080);
+      t.view.devicePixelRatio = 1.0;
+      addTearDown(t.view.reset);
+      mockNative();
+      final api = Api(token, port: port);
+      final st = (await t.runAsync(() => Settings.load(home.path)))!;
+      await t.pumpWidget(MaterialApp(
+        theme: ThemeData.dark(),
+        home: IdePage(api: api, settings: st, root: '${home.path}/projects/demo', tools: const [], onClose: () {}),
+      ));
+      await settle(t, () => find.text('main.sh').evaluate().isNotEmpty);
+      expect(find.byType(FileTree), findsOneWidget, reason: 'file tree on the left');
+      expect(find.text('Агент'), findsNothing, reason: 'no agent tab on the left when it can dock');
+
+      await t.tap(find.byTooltip('Агент'));
+      await settle(t, () => inAgent(find.byType(TextField)).evaluate().isNotEmpty);
+      expect(find.byType(AgentPanel), findsOneWidget);
+      expect(find.byType(FileTree), findsOneWidget, reason: 'files stay visible next to the agent');
+
+      // Ctrl+B hides the side bar, Ctrl+Shift+A closes the agent column.
+      FocusManager.instance.primaryFocus?.unfocus();
+      await t.pump();
+      await t.pump();
+      await t.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await t.sendKeyEvent(LogicalKeyboardKey.keyB);
+      await t.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await t.sendKeyEvent(LogicalKeyboardKey.keyA);
+      await t.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await t.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await t.pump();
+      expect(find.byType(FileTree), findsNothing);
+      expect(find.byType(AgentPanel), findsNothing);
       await closeIde(t);
     });
 

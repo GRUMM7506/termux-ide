@@ -210,7 +210,10 @@ class TermView extends StatelessWidget {
   final TermTab tab;
   final double fontSize;
   final bool showKeys;
-  const TermView({super.key, required this.tab, required this.fontSize, this.showKeys = true});
+
+  /// IDE shortcuts that work inside the terminal too (F5, Ctrl+`…).
+  final FocusOnKeyEventCallback? onKeyEvent;
+  const TermView({super.key, required this.tab, required this.fontSize, this.showKeys = true, this.onKeyEvent});
 
   @override
   Widget build(BuildContext context) {
@@ -225,6 +228,7 @@ class TermView extends StatelessWidget {
           textStyle: TerminalStyle(fontSize: fontSize, fontFamily: 'monospace'),
           padding: const EdgeInsets.all(6),
           autofocus: false,
+          onKeyEvent: onKeyEvent,
         ),
       ),
       if (showKeys) TerminalKeysBar(tab: tab),
@@ -333,6 +337,10 @@ class TerminalPanel extends StatelessWidget {
   final VoidCallback onHide;
   final VoidCallback onToggleMax;
 
+  /// Extra keys bar (ESC, CTRL, arrows…). Off with a hardware keyboard on big screens.
+  final bool showKeys;
+  final FocusOnKeyEventCallback? onKeyEvent;
+
   const TerminalPanel({
     super.key,
     required this.hub,
@@ -341,6 +349,8 @@ class TerminalPanel extends StatelessWidget {
     required this.onNewShell,
     required this.onHide,
     required this.onToggleMax,
+    this.showKeys = true,
+    this.onKeyEvent,
   });
 
   @override
@@ -421,7 +431,7 @@ class TerminalPanel extends StatelessWidget {
                         label: const Text('Открыть терминал'),
                       ),
                     )
-                  : TermView(tab: cur, fontSize: fontSize - 1),
+                  : TermView(tab: cur, fontSize: fontSize - 1, showKeys: showKeys, onKeyEvent: onKeyEvent),
             ),
           ]),
         );

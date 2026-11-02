@@ -2,6 +2,8 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <!-- Termux RUN_COMMAND: start the IDE server and open sessions in Termux -->
     <uses-permission android:name="com.termux.permission.RUN_COMMAND"/>
+    <!-- Samsung DeX, Chromebooks, desktop mode: mouse + keyboard without a touchscreen -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false"/>
 
     <application
         android:label="Termux IDE"
@@ -14,7 +16,7 @@
             android:launchMode="singleTop"
             android:taskAffinity=""
             android:theme="@style/LaunchTheme"
-            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:configChanges="orientation|keyboardHidden|keyboard|navigation|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
             android:resizeableActivity="true"
             android:windowSoftInputMode="adjustResize">
@@ -22,6 +24,9 @@
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
+            <!-- Samsung DeX: open as a large window (resizable, maximizable) -->
+            <meta-data android:name="com.samsung.android.dex.launchwidth" android:value="1440"/>
+            <meta-data android:name="com.samsung.android.dex.launchheight" android:value="900"/>
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
@@ -30,6 +35,10 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- Samsung DeX: keep the app (open files, terminals, agent) when switching phone <-> DeX -->
+        <meta-data android:name="com.samsung.android.keepalive.density" android:value="true"/>
+        <meta-data android:name="com.samsung.android.multidisplay.keep_process_alive" android:value="true"/>
+        <meta-data android:name="com.sec.android.support.multiwindow" android:value="true"/>
     </application>
 
     <queries>

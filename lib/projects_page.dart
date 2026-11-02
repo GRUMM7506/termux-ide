@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import 'api.dart';
@@ -105,7 +107,11 @@ class _ProjectsPageState extends State<ProjectsPage> {
       ),
       body: SafeArea(
         top: false,
-        child: ListView(padding: const EdgeInsets.all(16), children: [
+        child: ListView(padding: EdgeInsets.symmetric(
+          vertical: 16,
+          // Big screens (tablet, DeX): keep the list readable instead of stretching it edge to edge.
+          horizontal: math.max(16, (MediaQuery.sizeOf(context).width - 900) / 2),
+        ), children: [
         Wrap(spacing: 12, runSpacing: 12, children: [
           FilledButton.icon(onPressed: _newProject, icon: const Icon(Icons.add), label: const Text('Новый проект')),
           OutlinedButton.icon(
